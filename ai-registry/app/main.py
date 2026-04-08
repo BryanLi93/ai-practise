@@ -1,8 +1,8 @@
 from fastapi import FastAPI, status, HTTPException, Depends
 from sqlalchemy.orm import Session
-from schemas import ModelResponse, Provider, ModelCreate, ModelUpdate
-from database import get_db, init_db
-import crud
+from app.schemas import ModelResponse, Provider, ModelCreate, ModelUpdate
+from app.database import get_db, init_db
+import app.crud as crud
 
 app = FastAPI()
 init_db()

@@ -1,6 +1,6 @@
 from sqlalchemy import String, Float, Boolean
 from sqlalchemy.orm import Mapped, mapped_column
-from database import Base
+from app.database import Base
 
 class AIModel(Base):
     __tablename__ = "ai_models"

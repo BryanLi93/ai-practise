@@ -1,5 +1,5 @@
-from schemas import ModelCreate, ModelUpdate, Provider
-from models import AIModel
+from app.schemas import ModelCreate, ModelUpdate, Provider
+from app.models import AIModel
 from sqlalchemy.orm import Session
 from sqlalchemy import select
 

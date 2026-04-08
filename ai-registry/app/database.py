@@ -2,7 +2,9 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 from collections.abc import Generator 
 import os
+from dotenv import load_dotenv
 
+load_dotenv()  # 读取 .env 文件
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://dev:devpass@localhost:5432/ai_registry")
 
 engine = create_engine(DATABASE_URL)
