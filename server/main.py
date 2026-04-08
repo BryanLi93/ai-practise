@@ -34,20 +34,20 @@ class PricingTier(BaseModel):
 class ModelCreate(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     provider: str = Field(min_length=1)
-    version: str = Field(pattern=r"^\d+\.\d+$")
+    version: str = Field(pattern=r"^\d{4}-\d{2}(-\d{2})?$")
     pricing_tier: PricingTier | None = None
     
     @field_validator("provider")
     @classmethod
-    def validate_provider(cls, str) -> str:
-        if str not in provider_list:
+    def validate_provider(cls, v: str) -> str:
+        if v not in provider_list:
             raise ValueError(f"provider 必须是 {provider_list} 之一")
-        return str
+        return v
 
 class ModelUpdate(BaseModel):
     name: str | None = Field(None, min_length=1, max_length=100)
     provider: str | None = Field(None, min_length=1)
-    version: str | None = Field(None, pattern=r"^\d+\.\d+$")
+    version: str | None = Field(None, pattern=r"^\d{4}-\d{2}(-\d{2})?$")
     pricing_tier: PricingTier | None = None
 class ModelResponse(ModelCreate):
     id: int
@@ -73,12 +73,12 @@ class Models():
         )
         self.models.append(new_mode)
         return new_mode
-    def update(self, id: int, model_info: ModelUpdate):
+    def update(self, id: int, model_info: ModelUpdate | ModelCreate):
         result = next(((i, m) for i, m in enumerate(self.models) if m.id == id), (-1, None))
         index, model = result
         if not model:
             raise ValueError("未找到数据")
-        self.models[index] = model.model_copy(update=model_info.model_dump(exclude={"id"}))
+        self.models[index] = model.model_copy(update=model_info.model_dump(exclude_unset=True))
         return self.models[index]
     def delete(self, id: int):
         original_len = len(self.models)
@@ -92,7 +92,7 @@ class Models():
 id_generator = IdGenerator()
 models = Models([
     ModelResponse(id=id_generator.get_new_id(), name="GPT-4o", provider="OpenAI", version="2024-08-06"),
-    ModelResponse(id=id_generator.get_new_id(), name="Claude 3.5 Sonnet", provider="Anthropic", version="20241022"),
+    ModelResponse(id=id_generator.get_new_id(), name="Claude 3.5 Sonnet", provider="Anthropic", version="2024-10-22"),
     ModelResponse(id=id_generator.get_new_id(), name="Gemini 2.0 Flash", provider="Google", version="2025-02"),
     ModelResponse(id=id_generator.get_new_id(), name="Qwen2.5-72B", provider="Alibaba", version="2024-09"),
     ModelResponse(id=id_generator.get_new_id(), name="DeepSeek-V3", provider="DeepSeek", version="2024-12"),
@@ -104,7 +104,7 @@ def list_models(skip: int = 0, limit: int = 100):
     return models.get_models()[skip: skip + limit]
 
 # 查询列表
-@app.get('/models/search', response_model=[ModelResponse])
+@app.get('/models/search', response_model=list[ModelResponse])
 def list_models_filtered(provider: Provider):
     return [m for m in models.get_models() if m.provider == provider]
 
@@ -124,7 +124,7 @@ def create_model(model: ModelCreate):
 
 # 更新
 @app.put('/models/{model_id}', response_model=ModelResponse)
-def update_model(model_id: int, model_info: ModelUpdate):
+def update_model(model_id: int, model_info: ModelCreate):
     try:
         new_model = models.update(id=model_id, model_info=model_info)
         return new_model
@@ -134,16 +134,16 @@ def update_model(model_id: int, model_info: ModelUpdate):
 # 部分更新
 @app.patch('/models/{model_id}', response_model=ModelResponse)
 def patch_model(model_id: int, model_info: ModelUpdate):
-    patch_data_dict = model_info.model_dump(exclude_unset=True)
-    patch_data = ModelUpdate.model_validate(patch_data_dict)
+    # patch_data_dict = model_info.model_dump(exclude_unset=True)
+    # patch_data = ModelUpdate.model_validate(patch_data_dict)
     try:
-        new_model = models.update(id=model_id, model_info=patch_data)
+        new_model = models.update(id=model_id, model_info=model_info)
         return new_model
     except ValueError:
         raise HTTPException(status_code=404, detail="Model not found")
 
 # 删除
-@app.delete('/models/{model_id}', status_code=status.HTTP_204_NO_CONTENT, response_model=bool)
+@app.delete('/models/{model_id}', status_code=status.HTTP_204_NO_CONTENT)
 def delete_model(model_id: int):
     try:
         models.delete(id=model_id)
