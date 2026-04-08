@@ -1,8 +1,9 @@
 from sqlalchemy import create_engine
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 from collections.abc import Generator 
+import os
 
-DATABASE_URL = "postgresql://dev:devpass@localhost:5432/ai_registry"
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://dev:devpass@localhost:5432/ai_registry")
 
 engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(bind=engine)
