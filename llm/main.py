@@ -42,9 +42,9 @@ def func_call(messages: list[ChatCompletionMessageParam]):
     if message.tool_calls:
         tool_messages = []
         for tool_call in message.tool_calls:
-            name = tool_call.function.name
+            name = tool_call.function.name # type: ignore[attr-defined]
 
-            arguments = tool_call.function.arguments
+            arguments = tool_call.function.arguments # type: ignore[attr-defined]
             args = json.loads(arguments)
 
             result = tools_registry[name](**args)
