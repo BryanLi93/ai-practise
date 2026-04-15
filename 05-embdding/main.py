@@ -4,4 +4,6 @@
 
 # import lesson_03_chunk
 
-import lesson_05_PDF
+# import lesson_04_PDF
+
+import lesson_05_pgvector
