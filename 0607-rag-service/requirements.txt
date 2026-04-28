@@ -1,0 +1,13 @@
+fastapi[standard]
+uvicorn
+sqlalchemy[asyncio]>=2.0
+psycopg[binary]
+pgvector
+greenlet
+google-genai
+openai
+pydantic
+pydantic-settings
+python-dotenv
+tiktoken
+tenacity
