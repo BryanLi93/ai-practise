@@ -11,3 +11,4 @@ pydantic-settings
 python-dotenv
 tiktoken
 tenacity
+httpx

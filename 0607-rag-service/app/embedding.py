@@ -11,6 +11,7 @@ from tenacity import (
 )
 import asyncio
 import logging
+import httpx
 logger = logging.getLogger(__name__)
 
 # ---------- 常量 ----------
@@ -63,7 +64,7 @@ async def _embed_batch_with_retry(
     async for attempt in AsyncRetrying(
         stop=stop_after_attempt(6),
         wait=wait_exponential(multiplier=2, min=4, max=60),
-        retry=retry_if_exception_type(genai_errors.APIError),
+        retry=retry_if_exception_type((genai_errors.APIError, httpx.HTTPError)),
         before_sleep=before_sleep_log(logger, logging.WARNING),
         reraise=True,
     ):
@@ -113,4 +114,3 @@ async def embed_query(text: str) -> list[float]:
     """
     embeddings = await _embed_batch_with_retry([text], "RETRIEVAL_QUERY")
     return embeddings[0]
-
