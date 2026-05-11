@@ -37,7 +37,18 @@ class QueryRequest(BaseModel):
         description="检索返回的 chunk 数量,默认 5",
     )
 
+class Source(BaseModel):
+    """检索到的 chunk 引用信息。"""
+    id: int = Field(description="引用编号,对应 answer 中的 [n] 标记")
+    chunk_id: int = Field(description="chunks 表主键")
+    document_id: int = Field(description="所属文档 id")
+    document_filename: str = Field(description="文档名")
+    chunk_index: int = Field(description="chunk 在文档内的顺序")
+    content: str = Field(description="chunk 内容")
+    similarity: float = Field(description="相似度分数 0-1,越高越相关")
+
+
 class QueryResponse(BaseModel):
     """RAG 答案。"""
     answer: str = Field(description="基于检索内容生成的答案")
-    # Day 3 会加 sources: list[SourceChunk] 字段做引用溯源
+    sources: list[Source] = Field(description="答案引用的 chunks 列表")

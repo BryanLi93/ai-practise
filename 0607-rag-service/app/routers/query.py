@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 logger = logging.getLogger(__name__)
 
 from app.db import get_db
-from app.schemas import QueryRequest, QueryResponse
+from app.schemas import QueryRequest, QueryResponse, Source
 from app.services.retrieval import query as run_query
 
 router = APIRouter(prefix="/query", tags=["query"])
@@ -31,12 +31,26 @@ async def query_endpoint(
     用户提问 → 检索 → 生成答案。
     """
     try:
-        answer = await run_query(db, question=request.question, top_k=request.top_k)
+        result = await run_query(db, question=request.question, top_k=request.top_k)
     except Exception as e:
         logger.exception("query failed")
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"Query failed: {type(e).__name__}",
         )
+    
+    sources = [
+        Source(
+            id=i,
+            chunk_id=rc.chunk.id,
+            document_id=rc.document.id,
+            document_filename=rc.document.filename,
+            chunk_index=rc.chunk.chunk_index,
+            content=rc.chunk.content,
+            similarity=round(rc.similarity, 4),
+        )
+        for i, rc in enumerate(result.sources, start=1)
+    ]
+    
 
-    return QueryResponse(answer=answer)
+    return QueryResponse(answer=result.answer, sources=sources)
