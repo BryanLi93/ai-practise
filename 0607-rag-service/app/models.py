@@ -1,5 +1,10 @@
+from typing import Any
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
-from sqlalchemy import String, Integer, DateTime, func, ForeignKey, Text
+from sqlalchemy import (
+    String, Integer, DateTime, func, ForeignKey, Text,
+    Computed, Index
+)
+from sqlalchemy.dialects.postgresql import TSVECTOR
 from datetime import datetime
 from pgvector.sqlalchemy import HALFVEC
 from app.config import settings
@@ -35,3 +40,18 @@ class Chunk(Base):
     embedding: Mapped[list[float]] = mapped_column(HALFVEC(settings.embedding_dim))
 
     document: Mapped["Document"] = relationship(back_populates="chunks")
+    
+    # 新增:自动从 content 派生的 tsvector
+    content_tsv: Mapped[Any] = mapped_column(
+        TSVECTOR,
+        Computed("to_tsvector('chinese_zh', content)", persisted=True)
+    )
+
+     # GIN 索引,加速 @@ 查询
+    __table_args__ = (
+        Index(
+          "idx_chunks_content_tsv",
+          "content_tsv",
+          postgresql_using="gin",
+        ),
+    )

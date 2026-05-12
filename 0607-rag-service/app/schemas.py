@@ -47,6 +47,9 @@ class Source(BaseModel):
     content: str = Field(description="chunk 内容")
     similarity: float = Field(description="相似度分数 0-1,越高越相关")
 
+    vector_rank: int | None = None
+    keyword_rank: int | None = None
+
 
 class QueryResponse(BaseModel):
     """RAG 答案。"""
