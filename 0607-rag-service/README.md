@@ -78,7 +78,7 @@ fastapi dev app/main.py
 - LangGraph Agent 化(Week 9-10)
 - 前端产品化(Vercel AI SDK,Week 11-12)
 
-## 问题
+## For 面试
 
 用户问一个问题，端到端发生了什么？请按时间顺序写出每一步。
 为什么 chunks 表的 embedding 列要用 halfvec(1536) 而不是 vector(3072)？
@@ -91,3 +91,7 @@ RAG 的"幻觉"是怎么产生的？我们的 prompt 是怎么约束的？
 为什么要 RRF？两路量纲不同
 为什么还要 Rerank？召回阶段精度有上限
 为什么不只用 Rerank？算不动那么多候选
+
+做过一个完整的 RAG service。技术栈是 FastAPI + PostgreSQL/pgvector + Gemini。
+检索是三段式:召回用 pgvector 余弦距离 + zhparser 中文分词的 tsvector 混合检索,RRF 融合(因为两路分数量纲不同);精排用 BGE-reranker-v2-m3 cross-encoder 对 top 20 重排;生成用 Gemini Flash,prompt 强约束基于 context 回答并要求 [n] 引用标注。
+几个工程细节:embedding 用 Matryoshka 把 3072 维截到 1536,因为 pgvector HNSW 索引上限是 2000;PDF 解析用 PyMuPDF 加启发式去重复页眉页脚;Free tier 限流用 tenacity 退避 + 主动节流处理。
