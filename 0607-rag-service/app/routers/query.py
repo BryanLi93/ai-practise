@@ -49,7 +49,8 @@ async def query_endpoint(
             content=rc.chunk.content,
             similarity=round(rc.similarity, 4),
             vector_rank=rc.vector_rank,
-            keyword_rank=rc.keyword_rank
+            keyword_rank=rc.keyword_rank,
+            rerank_score=rc.rerank_score
         )
         for i, rc in enumerate(result.sources, start=1)
     ]

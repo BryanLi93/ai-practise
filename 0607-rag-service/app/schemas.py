@@ -49,6 +49,7 @@ class Source(BaseModel):
 
     vector_rank: int | None = None
     keyword_rank: int | None = None
+    rerank_score: float | None = None
 
 
 class QueryResponse(BaseModel):

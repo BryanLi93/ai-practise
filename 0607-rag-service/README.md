@@ -33,3 +33,9 @@ fastapi dev app/main.py
 为什么 embed_documents 和 embed_query 要用不同的 task_type？
 db.flush() 和 db.commit() 的差别是什么？为什么 ingest 服务里要 flush 而不直接 commit？
 RAG 的"幻觉"是怎么产生的？我们的 prompt 是怎么约束的？
+
+为什么不只用向量？盲区
+为什么不只用关键词？语义
+为什么要 RRF？两路量纲不同
+为什么还要 Rerank？召回阶段精度有上限
+为什么不只用 Rerank？算不动那么多候选

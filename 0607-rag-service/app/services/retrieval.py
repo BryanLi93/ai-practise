@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+import asyncio
 
 from google import genai
 from google.genai import types
@@ -15,6 +16,7 @@ from sqlalchemy.orm import selectinload
 from app.embedding import embed_query, get_client as get_genai_client
 from app.models import Chunk, Document
 from app.config import settings
+from app.rerank import rerank as do_rerank
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +27,10 @@ DEFAULT_TOP_K = 5
 # 新增:
 CANDIDATES_MULTIPLIER = 4   # 每路检索召回 top_k * 4 个候选,留出 RRF 融合空间
 RRF_K = 60                  # RRF 平滑常数,标准取值
+
+# 新增:
+RERANK_CANDIDATES = 20      # 送给 reranker 的候选数(从 RRF 融合后取这么多)
+ENABLE_RERANK = False        # 开关,方便对比测试
 
 # 检索结果不足时,直接告诉用户
 NO_CONTEXT_ANSWER = "根据现有知识库,我没有找到能回答这个问题的相关内容。"
@@ -68,6 +74,7 @@ class RetrievedChunk:
     score: float                # RRF 融合分数
     vector_rank: int | None     # 在向量路径里的名次(1-based),没召回到则 None
     keyword_rank: int | None    # 在关键词路径里的名次,没召回到则 None
+    rerank_score: float | None = None
 
     @property
     def similarity(self) -> float:
@@ -226,13 +233,13 @@ async def _hybrid_retrieve(
     db: AsyncSession,
     question: str,
     query_vector: list[float],
-    top_k: int
+    candidates: int, # 改:不是 top_k,是要召回多少候选
 ) -> list[RetrievedChunk]:
     """向量 + 关键词并行检索,RRF 融合,返回 top_k 结果。"""
-    candidates = top_k * CANDIDATES_MULTIPLIER
+    per_path = candidates * CANDIDATES_MULTIPLIER
 
-    vector_rankings = await _retrieve_by_vector(db, query_vector, candidates)
-    keyword_rankings = await _retrieve_by_keyword(db, question, candidates)
+    vector_rankings = await _retrieve_by_vector(db, query_vector, per_path)
+    keyword_rankings = await _retrieve_by_keyword(db, question, per_path)
 
     logger.info(
         "hybrid candidates: vector=%d, keyword=%d, overlap=%d",
@@ -241,9 +248,29 @@ async def _hybrid_retrieve(
         len(set(vector_rankings) & set(keyword_rankings)),
     )
 
-    fused = await _rrf_fuse(vector_rankings, keyword_rankings, top_k)
+    fused = await _rrf_fuse(vector_rankings, keyword_rankings, candidates)
 
     return await _load_chunks(db, fused)
+
+async def _rerank_chunks(
+    question: str,
+    candidates: list[RetrievedChunk],
+    top_k: int
+) -> list[RetrievedChunk]:
+    """对 candidates 做 cross-encoder rerank,返回 top_k。"""
+    if not candidates:
+        return []
+    
+    # 在线程池里跑同步推理,不阻塞事件循环
+    docs = [rc.chunk.content for rc in candidates]
+    scores = await asyncio.to_thread(do_rerank, question, docs)
+
+    # 用 rerank 分数排序
+    for rc, score in zip(candidates, scores):
+        rc.rerank_score = score
+
+    reranked = sorted(candidates, key = lambda rc: rc.rerank_score or 0.0, reverse=True)
+    return reranked[:top_k]
 
 # ---------- 内部:Prompt 组装 ----------
 def _format_context(retrieved: list[RetrievedChunk]) -> str:
@@ -298,16 +325,27 @@ async def query(
 
     # 2. 检索 top-k chunks
     # retrieved = await _retrieve_chunks(db, query_vector=query_vector, top_k=top_k)
-    retrieved = await _hybrid_retrieve(db, question=question, query_vector=query_vector, top_k=top_k)
+    # 召回(混合检索)
+    candidates = await _hybrid_retrieve(
+        db, question=question, query_vector=query_vector,
+        candidates=RERANK_CANDIDATES
+    )
 
-    if not retrieved:
+    if not candidates:
         return QueryResult(answer=NO_CONTEXT_ANSWER, sources=[])
     
-    logger.info("retrieved %d chunks", len(retrieved))
+    # Rerank
+    if ENABLE_RERANK:
+        retrieved = await _rerank_chunks(question, candidates, top_k)
+    else:
+        retrieved = candidates[:top_k]
+    
     for i, rc in enumerate(retrieved, start=1):
         logger.debug(
-            "  [%d] score=%.4f v_rank=%s k_rank=%s doc=%s chunk=%d",
-            i, rc.score, rc.vector_rank, rc.keyword_rank,
+            "  [%d] rrf=%.4f rerank=%s v=%s k=%s doc=%s chunk=%d",
+            i, rc.score,
+            f"{rc.rerank_score:.4f}" if rc.rerank_score else "N/A",
+            rc.vector_rank, rc.keyword_rank,
             rc.document.filename, rc.chunk.chunk_index,
         )
 
