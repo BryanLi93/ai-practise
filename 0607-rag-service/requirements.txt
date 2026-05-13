@@ -11,4 +11,6 @@ pydantic-settings
 python-dotenv
 tiktoken
 tenacity
-httpx
+langchain-text-splitters
+pymupdf
+sentence-transformers

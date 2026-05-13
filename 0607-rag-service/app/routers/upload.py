@@ -13,21 +13,23 @@ logger = logging.getLogger(__name__)
 from app.db import get_db
 from app.schemas import UploadResponse
 from app.services.ingest import ingest_text_file, EmptyContentError
+from app.parsing import parse_file
 
 router = APIRouter(prefix="/upload", tags=["upload"])
 
 # ---------- 常量 ----------
 
-MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
+MAX_FILE_SIZE = 30 * 1024 * 1024  # 30 MB
 
 ALLOWED_CONTENT_TYPES = {
     "text/plain",
     "text/markdown",
     "text/x-markdown",        # 部分浏览器/客户端用这个
     "application/octet-stream",  # 兜底:有时浏览器识别不出 .md
+    "application/pdf",
 }
 
-ALLOWED_EXTENSIONS = {".txt", ".md", ".markdown"}
+ALLOWED_EXTENSIONS = {".txt", ".md", ".markdown", ".pdf"}
 
 # ---------- 工具 ----------
 def _validate_file(file: UploadFile):
@@ -43,18 +45,6 @@ def _validate_file(file: UploadFile):
         status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
         detail=f"Only .txt and .md files supported. Got filename={file.filename}, "
                f"content_type={file.content_type}",
-    )
-
-def _decode_bytes(data: bytes) -> str:
-    """尝试用常见编码解码。"""
-    for encoding in ("utf-8", "utf-8-sig", "gbk"):
-        try:
-            return data.decode(encoding)
-        except UnicodeDecodeError:
-            continue
-    raise HTTPException(
-        status_code=status.HTTP_400_BAD_REQUEST,
-        detail="Cannot decode file: unsupported encoding (tried utf-8, gbk)",
     )
 
 # ---------- 路由 ----------
@@ -90,8 +80,24 @@ async def upload_file(
             detail=f"File too large ({byte_size} bytes), max {MAX_FILE_SIZE}",
         )        
 
-    # 解码
-    content = _decode_bytes(raw_bytes)
+    # 解析(根据文件类型派发到对应 parser)
+    try:
+        content = parse_file(
+            raw_bytes,
+            content_type=file.content_type or "",
+            filename=file.filename or "",
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+    except Exception as e:
+        logger.exception("file parsing failed")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Failed to parse file: {type(e).__name__}",
+        )
 
     # 入库
     try:

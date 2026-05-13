@@ -352,7 +352,7 @@ async def query(
 
     # 3. 组装 context(把多个 chunk 用分隔符拼接)
     content = _format_context(retrieved)
-    # logger.info(content)
+    logger.info(content)
 
     # 4. 调 LLM 生成答案
     answer = await _generate_answer(question, content)
