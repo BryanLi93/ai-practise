@@ -10,7 +10,8 @@ API 请求/响应 schemas。
 from __future__ import annotations
 
 from datetime import datetime
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
+import uuid
 
 # ---------- Upload 端点 ----------
 
@@ -36,6 +37,10 @@ class QueryRequest(BaseModel):
         le=20,
         description="检索返回的 chunk 数量,默认 5",
     )
+    conversation_id: uuid.UUID | None = Field(
+        default=None,
+        description="会话 id,不传则创建新会话",
+    )
 
 class Source(BaseModel):
     """检索到的 chunk 引用信息。"""
@@ -56,3 +61,35 @@ class QueryResponse(BaseModel):
     """RAG 答案。"""
     answer: str = Field(description="基于检索内容生成的答案")
     sources: list[Source] = Field(description="答案引用的 chunks 列表")
+    conversation_id: uuid.UUID
+
+# ---------- Conversation 端点 ----------
+class ConversationCreate(BaseModel):
+    title: str | None = Field(default=None, max_length=256)
+
+class ConversationSummary(BaseModel):
+    """会话列表项(不含消息)。"""
+    id: uuid.UUID
+    title: str | None
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+class MessageOut(BaseModel):
+    """单条消息。"""
+    id: int
+    role: str
+    content: str
+    sources: list[Source] | None = None
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+class ConversationDetail(BaseModel):
+    """会话详情(含全部消息)。"""
+    id: uuid.UUID
+    title: str | None
+    created_at: datetime
+    messages: list[MessageOut]
+
+    model_config = ConfigDict(from_attributes=True)

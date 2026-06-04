@@ -13,6 +13,7 @@ logger = logging.getLogger(__name__)
 from app.db import get_db
 from app.schemas import QueryRequest, QueryResponse, Source
 from app.services.retrieval import query as run_query
+from app.services import conversation as conv_service
 
 router = APIRouter(prefix="/query", tags=["query"])
 
@@ -30,6 +31,18 @@ async def query_endpoint(
     """
     用户提问 → 检索 → 生成答案。
     """
+    # 1. 解析/创建会话
+    if request.conversation_id is None:
+        # 新会话
+        conv = await conv_service.create_conversation(db, title=request.question[:50])
+        conversation_id = conv.id
+    else:
+        if not await conv_service.conversation_exists(db, request.conversation_id):
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        else:
+            conversation_id = request.conversation_id
+
+    # 2. 跑 RAG(Day 1 还是单轮,Day 2 才加历史)
     try:
         result = await run_query(db, question=request.question, top_k=request.top_k)
     except Exception as e:
@@ -38,7 +51,8 @@ async def query_endpoint(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"Query failed: {type(e).__name__}",
         )
-    
+
+    # 3. 构造 sources(沿用你原有逻辑)
     sources = [
         Source(
             id=i,
@@ -54,6 +68,23 @@ async def query_endpoint(
         )
         for i, rc in enumerate(result.sources, start=1)
     ]
-    
 
-    return QueryResponse(answer=result.answer, sources=sources)
+    # 4. 持久化两条消息(同一事务)
+    await conv_service.add_message(
+        db,
+        conversation_id=conversation_id,
+        role="user",
+        content=request.question,
+        commit=False
+    )
+    await conv_service.add_message(
+        db,
+        conversation_id=conversation_id,
+        role="assistant",
+        content=result.answer,
+        sources=[s.model_dump() for s in sources],
+        commit=True
+    )
+
+    # 5. 返回(带 conversation_id)
+    return QueryResponse(answer=result.answer, sources=sources, conversation_id=conversation_id)

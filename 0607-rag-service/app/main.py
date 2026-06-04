@@ -11,7 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 
-from app.routers import upload, query
+from app.routers import upload, query, conversation
 from app.config import settings
 from app.db import engine
 
@@ -64,6 +64,7 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
 # ---------- 路由 ----------
 app.include_router(upload.router)
 app.include_router(query.router)
+app.include_router(conversation.router)
 
 @app.get("/")
 async def root():
