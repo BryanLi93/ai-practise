@@ -43,8 +43,10 @@
 27. **消息按 `id` 排序,不按 `created_at`**:PG 的 `func.now()` 返回**事务开始时间**,同一事务内插入的多条消息时间戳相同,按 id 才可靠。
 28. **`sources_json` 用 JSONB,不建关联表**:展示用、不查询的数据;强结构+高频查询才建表。
 29. **存取闭环**:存时 `Source.model_dump()` → dict → JSONB;取时 JSONB → dict,靠 Pydantic 类型声明 `list[Source]` 自动转回对象。
-30. **Query Rewriting(Day 2 待做)**:多轮对话中,先让 LLM 把含指代/省略的当前问题改写成独立问题,再检索。LangChain ConversationalRetrievalChain 默认做法。第一轮无历史则跳过。
-31. **历史滑动窗口**:保留最近约 10 轮。摘要压缩留到长对话场景再加,不预先优化。
+30. **Query Rewriting(Day 2 已完成)**:多轮对话中,先让 LLM 把含指代/省略的当前问题改写成独立问题,再检索。LangChain ConversationalRetrievalChain 默认做法。第一轮无历史则跳过(省一次 LLM 调用)。
+31. **历史滑动窗口**:保留最近约 10 轮(当前实现 `get_recent_messages(limit=6)`,DESC 取最新再 reversed 成正序)。摘要压缩留到长对话场景再加,不预先优化。
+39. **检索用改写句、生成用原话(Day 2)**:`search_query`(改写后)只喂给 embedding/检索/rerank;`question`(用户原话)+ 历史喂给生成。理由:改写是为补偿"检索器无状态"打的补丁,是有损机器转写;生成阶段有历史可看,不需要补丁,用原话能避免改写错误烙进答案、保持对用户原意的忠实。两个变量全程并存。
+40. **写库放在 RAG 成功之后 + 单事务一次 commit(Day 2)**:`handle_chat` 先只读(取历史)→ 改写 → 检索生成(均不写库)→ 成功后才 `create_conversation(commit=False)` + 两条 `add_message(commit=False)` + 一次 `db.commit()`。避免"RAG 失败留空会话",也避免把 DB 事务挂在慢 LLM 调用上。service 抛 `ConversationNotFound` 领域异常,由 router 翻译成 404(状态码不进 service)。
 
 ## 通用 Python/工程
 32. **pydantic-settings 类型安全配置**:`Settings()` import 即校验,缺必填值 fail fast。Pylance 对 `Settings()` 误报 `reportCallIssue`,用 `# type: ignore[call-arg]` 抑制单行。
