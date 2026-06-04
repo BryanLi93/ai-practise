@@ -78,3 +78,16 @@ async def conversation_exists(
     """轻量检查会话是否存在(不加载消息)。"""
     conv = await db.get(Conversation, conversation_id)
     return conv is not None
+
+async def get_recent_messages(
+    db: AsyncSession,
+    conversation_id: uuid.UUID,
+    limit: int = 6
+) -> list[Message]:
+    # 查询最近 limit 条消息
+    stmt = (select(Message)
+        .where(Message.conversation_id == conversation_id)
+        .order_by(Message.created_at.desc())
+        .limit(limit))
+    result = await db.execute(stmt)
+    return list(result.scalars().all())

@@ -14,6 +14,7 @@ from app.db import get_db
 from app.schemas import QueryRequest, QueryResponse, Source
 from app.services.retrieval import query as run_query
 from app.services import conversation as conv_service
+from app.services import chat as chat_service
 
 router = APIRouter(prefix="/query", tags=["query"])
 
@@ -31,6 +32,9 @@ async def query_endpoint(
     """
     用户提问 → 检索 → 生成答案。
     """
+    recent_messages = []
+    conversation_id = None
+
     # 1. 解析/创建会话
     if request.conversation_id is None:
         # 新会话
@@ -41,10 +45,16 @@ async def query_endpoint(
             raise HTTPException(status_code=404, detail="Conversation not found")
         else:
             conversation_id = request.conversation_id
+            recent_messages = await conv_service.get_recent_messages(db, conversation_id=request.conversation_id)
 
-    # 2. 跑 RAG(Day 1 还是单轮,Day 2 才加历史)
+    # 有历史才改写(第一轮没历史,省一次 AI 调用)
+    search_query = request.question
+    if recent_messages:
+        search_query = await chat_service.rewrite_query(request.question, recent_messages)
+
+    # 2. 跑 RAG
     try:
-        result = await run_query(db, question=request.question, top_k=request.top_k)
+        result = await run_query(db, question=search_query, top_k=request.top_k)
     except Exception as e:
         logger.exception("query failed")
         raise HTTPException(
