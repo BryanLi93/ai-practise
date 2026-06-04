@@ -87,7 +87,7 @@ async def get_recent_messages(
     # 查询最近 limit 条消息
     stmt = (select(Message)
         .where(Message.conversation_id == conversation_id)
-        .order_by(Message.created_at.desc())
+        .order_by(Message.id.desc()) # 先按 id 倒序,LIMIT 砍掉老的、留最新 6 条
         .limit(limit))
     result = await db.execute(stmt)
-    return list(result.scalars().all())
+    return list(reversed(result.scalars().all())) # 再翻成正序给 prompt 用

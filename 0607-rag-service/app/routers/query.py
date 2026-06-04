@@ -32,19 +32,12 @@ async def query_endpoint(
     """
     用户提问 → 检索 → 生成答案。
     """
-    recent_messages = []
-    conversation_id = None
-
     # 1. 解析/创建会话
-    if request.conversation_id is None:
-        # 新会话
-        conv = await conv_service.create_conversation(db, title=request.question[:50])
-        conversation_id = conv.id
-    else:
+    recent_messages = []
+    if request.conversation_id is not None:
         if not await conv_service.conversation_exists(db, request.conversation_id):
             raise HTTPException(status_code=404, detail="Conversation not found")
         else:
-            conversation_id = request.conversation_id
             recent_messages = await conv_service.get_recent_messages(db, conversation_id=request.conversation_id)
 
     # 有历史才改写(第一轮没历史,省一次 AI 调用)
@@ -54,7 +47,7 @@ async def query_endpoint(
 
     # 2. 跑 RAG
     try:
-        result = await run_query(db, question=search_query, top_k=request.top_k)
+        result = await run_query(db, question=request.question, search_query=search_query, recent_messages=recent_messages, top_k=request.top_k)
     except Exception as e:
         logger.exception("query failed")
         raise HTTPException(
@@ -80,6 +73,13 @@ async def query_endpoint(
     ]
 
     # 4. 持久化两条消息(同一事务)
+    if request.conversation_id is None:
+        # 新会话
+        conv = await conv_service.create_conversation(db, title=request.question[:50])
+        conversation_id = conv.id
+    else:
+        conversation_id = request.conversation_id
+
     await conv_service.add_message(
         db,
         conversation_id=conversation_id,

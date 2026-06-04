@@ -6,6 +6,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 import asyncio
+import re
 
 from google import genai
 from google.genai import types
@@ -14,7 +15,7 @@ from sqlalchemy import select, text as sql_text
 from sqlalchemy.orm import selectinload
 
 from app.embedding import embed_query, get_client as get_genai_client
-from app.models import Chunk, Document
+from app.models import Chunk, Document, Message
 from app.config import settings
 from app.rerank import rerank as do_rerank
 
@@ -46,10 +47,12 @@ SYSTEM_PROMPT = """你是一个严格基于上下文回答问题的助手。
 3. 一句话可以引用多个来源:"RAG 包含检索和生成两个阶段 [1][3]。"
 4. 如果上下文中没有足够信息回答问题,直接回答"根据现有知识库,我没有找到能回答这个问题的相关内容。"——不要标注任何编号,不要编造,不要使用上下文以外的常识。
 5. 回答简洁、准确,不要重复问题本身。
+6. 如果提供了"历史聊天记录",它仅用于帮助你理解当前问题的指代和背景,不是事实来源,也不能作为引用对象;事实和引用编号一律只能来自"上下文"。
 
 请严格遵守以上规则,特别是引用标注。"""
 
-USER_PROMPT_TEMPLATE = """上下文:
+USER_PROMPT_TEMPLATE = """
+上下文: 
 ---
 {context}
 ---
@@ -57,6 +60,13 @@ USER_PROMPT_TEMPLATE = """上下文:
 问题: {question}
 
 请基于上下文回答，并标注引用编号 [n]。"""
+
+HISTORY_PROMPT_TEMPLATE = """历史聊天记录:
+---
+{history}
+---
+
+"""
 
 # ---------- 内部数据结构 ----------
 @dataclass
@@ -280,10 +290,18 @@ def _format_context(retrieved: list[RetrievedChunk]) -> str:
     return "\n\n".join(parts)
 
 # ---------- 内部:生成 ----------
-async def _generate_answer(question: str, context: str) -> str:
+async def _generate_answer(question: str, context: str, recent_messages: list[Message]) -> str:
     client = get_genai_client()
 
+
     user_prompt = USER_PROMPT_TEMPLATE.format(context=context, question=question)
+
+    # 历史记录
+    if recent_messages:
+        history = "\n".join([f"{m.role}:{m.content}" for m in recent_messages])
+        history = re.sub(r"\[\d+\]", "", history) # 清除历史记录中的引用符号，避免影响提示词
+        history_prompt = HISTORY_PROMPT_TEMPLATE.format(history=history)
+        user_prompt = history_prompt + user_prompt
 
     response = await client.aio.models.generate_content(
         model=settings.chat_model,
@@ -292,7 +310,7 @@ async def _generate_answer(question: str, context: str) -> str:
             system_instruction=SYSTEM_PROMPT,
             temperature=0.1,
             max_output_tokens=1024,
-        )
+        ),
     )
 
     if not response.text:
@@ -305,6 +323,8 @@ async def query(
     db: AsyncSession,
     *,
     question: str,
+    search_query: str, # 改写的 question
+    recent_messages: list[Message],
     top_k: int = DEFAULT_TOP_K
 ) -> QueryResult:
     """
@@ -318,16 +338,16 @@ async def query(
     Returns:
         答案 + 引用源
     """
-    logger.info("query: %s (top_k=%d)", question, top_k)
+    logger.info("query: %s / search_query: %s (top_k=%d)", question, search_query, top_k)
 
     # 1. 把 question embed 成向量
-    query_vector = await embed_query(question)
+    query_vector = await embed_query(search_query)
 
     # 2. 检索 top-k chunks
     # retrieved = await _retrieve_chunks(db, query_vector=query_vector, top_k=top_k)
     # 召回(混合检索)
     candidates = await _hybrid_retrieve(
-        db, question=question, query_vector=query_vector,
+        db, question=search_query, query_vector=query_vector,
         candidates=RERANK_CANDIDATES
     )
 
@@ -336,7 +356,7 @@ async def query(
     
     # Rerank
     if ENABLE_RERANK:
-        retrieved = await _rerank_chunks(question, candidates, top_k)
+        retrieved = await _rerank_chunks(search_query, candidates, top_k)
     else:
         retrieved = candidates[:top_k]
     
@@ -355,5 +375,5 @@ async def query(
     logger.info(content)
 
     # 4. 调 LLM 生成答案
-    answer = await _generate_answer(question, content)
+    answer = await _generate_answer(question, content, recent_messages)
     return QueryResult(answer=answer, sources=retrieved)
