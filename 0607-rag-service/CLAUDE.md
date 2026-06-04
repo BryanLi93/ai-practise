@@ -1,7 +1,7 @@
 # RAG Service — 项目上下文（交接自 PROJECT_CONTEXT.md）
 
 > 本文件由长期对话的交接文档迁移而来,Claude Code 启动时自动读取为项目上下文。
-> **状态已于 2026-06-04 核对**:Week 7 Day 1 刚完成,准备进 Day 2。
+> **状态已于 2026-06-04 核对**:Week 7 Day 3 已完成(纯 HTML + vanilla JS 前端,挂在 `/ui`),准备进 Day 4(流式输出)。
 > 注意:git 仓库根在**上一级** `~/Documents/my-code/ai-practise`,本项目是其子目录;`.gitignore` 在上级。
 
 ---
@@ -76,7 +76,7 @@
 - **检索(三段式)**:8 pgvector 而非 ChromaDB / 9 tsvector+GIN 而非 rank_bm25 / 10 中文分词 zhparser / 11 content_tsv 用 Generated Column / 12 OR 风格+ts_rank_cd / 13 RRF 而非加权求和 / 14 召回候选=top_k×4 / 15 三段式架构 / 16 Rerank 用 BGE 本地而非 Cohere / 17 Bi-encoder vs Cross-encoder / 18 三个常量的漏斗
 - **生成**:19 system_instruction 参数 / 20 temperature=0.1 / 21 强 prompt+few-shot / 22 chunks 用 `---` 分隔
 - **引用溯源**:23 `[n]`+sources 数组 / 24 难点是引用正确性(faithfulness)
-- **多轮对话**:25 服务端持有历史 / 26 Conversation UUID、Message int / 27 按 id 排序不按 created_at / 28 sources_json 用 JSONB / 29 存取闭环 / 30 Query Rewriting(Day 2)/ 31 历史滑动窗口
+- **多轮对话**:25 服务端持有历史 / 26 Conversation UUID、Message int / 27 按 id 排序不按 created_at / 28 sources_json 用 JSONB / 29 存取闭环 / 30 Query Rewriting(Day 2 已完成)/ 31 历史滑动窗口 / 39 检索用改写句·生成用原话 / 40 写库放 RAG 之后·单事务
 - **通用 Python/工程**:32 pydantic-settings 配置 / 33 flush vs commit / 34 selectinload 避免 N+1 / 35 外键显式 index=True / 36 Text vs String(n) / 37 service/router 分层 / 38 全局异常处理器
 
 ---
@@ -161,6 +161,18 @@
   - main.py 注册 conversation 路由
   - `python -m scripts.init_db` 已建好 4 张表
   - **此时仍是单轮**:历史已存,但 RAG 还没用历史
+- **Day 2(多轮对话)— 已完成**:
+  - `services/conversation.py` 加 `get_recent_messages`(DESC 取最新 N 条再 reversed 成正序)
+  - `services/chat.py` 加 `rewrite_query`(LLM 改写指代/省略为独立问题,有历史才调)+ `handle_chat` 总编排 + `ConversationNotFound` 领域异常
+  - `services/retrieval.py` 的 `query()` 解耦:`search_query`(改写句)走检索,`question`(原话)+ `recent_messages` 走生成;`_generate_answer` 拼历史进 prompt(`re.sub` 去旧引用编号),`SYSTEM_PROMPT` 加规则 6 声明历史非引用源
+  - `routers/query.py` 瘦身成"调 handle_chat + 翻译异常(404/502)"
+  - 单事务:写库全部移到 RAG 成功之后,`create_conversation(commit=False)` 只 flush 拿 id,末尾一次 `db.commit()`;修掉"RAG 失败留空会话"
+  - 易错点记录见 `docs/PITFALLS.md`(P1–P9)
+- **Day 3(简单前端)— 已完成**:
+  - 新增 `web/index.html`(纯 HTML + vanilla JS,无构建/无框架):三栏布局 = 上传+会话列表 / 对话气泡+输入 / 引用侧栏
+  - 内置极简 Markdown 渲染器(不依赖 CDN);答案 `[n]` 可点击联动右侧来源高亮
+  - `app/main.py` 用 `StaticFiles(html=True)` 把 `web/` 挂到 `/ui`(与 API 同源,无 CORS);访问 `http://127.0.0.1:8000/ui/`
+  - "新对话"只清前端状态,服务端在首次 `/query` 才建会话(复用 Day 2 单事务,不留空会话)
 
 ---
 
@@ -168,9 +180,9 @@
 
 | Day | 任务 | 关键点 |
 |---|---|---|
-| **Day 2(下一步)** | Query Rewriting + 历史注入 | 让多轮对话"活"起来:加载最近 N 轮 → LLM 改写当前问题为独立问题 → 检索 → 历史拼进生成 prompt → 存历史。建议把会话编排从 router 抽到 chat service,顺便修"RAG 失败留空会话"的事务瑕疵 |
-| Day 3 | 简单前端 | 纯 HTML + vanilla JS(用上前端强项),文件上传 + 对话气泡 + Markdown 渲染 + 引用侧栏。Week 11-12 才用 Next.js 做产品级 |
-| Day 4 | 流式输出 | SSE + FastAPI StreamingResponse + Gemini generate_content_stream + 前端 EventSource。建议单独做,涉及前后端两层 |
+| ~~Day 2~~(已完成) | Query Rewriting + 历史注入 | ✅ 已实现:`get_recent_messages` → `rewrite_query` → 解耦 search_query/question → 历史进生成 prompt → `handle_chat` 编排 + 单事务。详见第 5 节与 `docs/PITFALLS.md` |
+| ~~Day 3~~(已完成) | 简单前端 | ✅ `web/index.html` 三栏(上传/对话/引用),内置 Markdown 渲染,挂在 `/ui`。详见第 5 节 |
+| **Day 4(下一步)** | 流式输出 | SSE + FastAPI StreamingResponse + Gemini generate_content_stream + 前端 EventSource。建议单独做,涉及前后端两层 |
 | Day 5 | 结构化日志 | JSON 日志 + trace_id 中间件 + 异常分层(401/403/404/422/429/500/502/503)+ 关键路径 timing |
 | Day 6 | 基础监控 | /metrics 端点:QPS/延迟/错误率、token 用量、召回数分布、rerank score 分布。可选接 prometheus_client |
 | Day 7 | Docker 整合 | FastAPI 也容器化,compose 编排两服务,HF 模型缓存 volume 持久化,一键 `docker compose up` |
@@ -187,7 +199,8 @@
 - **PDF 解析对扫描件无效**:无文本层需 OCR,超出当前范围
 - **Free tier 限流**:embedding ~5 RPM,大文档入库慢;长对话多一次 query rewrite 调用,更吃配额
 - **`similarity` 字段语义模糊**:经 RRF 后是 `min(1.0, rrf_score*30)`,既非 cosine 也非纯 RRF;生产建议改用 rank
-- **RAG 失败留空会话**:query 路由先建会话再跑 RAG,失败会留空会话(Day 2 抽 chat service 时修)
+- ~~**RAG 失败留空会话**~~:**已于 Day 2 修复**——写库全部移到 RAG 成功之后,`handle_chat` 单事务一次 commit,失败回滚不留空会话
+- **LLM 调用无重试**:`rewrite_query` / `_generate_answer` 的 `generate_content` 是裸调,不像 `embedding.py` 有 tenacity 退避;free tier 撞 429 或代理抖动直接 502。生产需补(暂列为 Day 2 遗留优化项 ③)
 - **标题孤儿问题**:Markdown 标题可能被单独切成一个无信息 chunk(如 `## 检索流程`);未处理,Week 13-14 评测暴露后再优化(可选 MarkdownHeaderTextSplitter)
 - **chunk 策略是"凑合能用"**:chunk_size=500/overlap=50 是起步值,未调优;overlap 仅在"切碎超长段落"时生效,纯段落合并不加 overlap
 - **小知识库混合检索优势不明显**:当前测试集 Gemini embedding 已很强,混合检索主要起"补强"而非"救场"作用;但多语言/长尾场景仍需要

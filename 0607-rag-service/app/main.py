@@ -5,10 +5,12 @@ from __future__ import annotations
 
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 
 from app.routers import upload, query, conversation
@@ -78,3 +80,10 @@ async def root():
 async def health():
     """健康检查端点(后续 Docker / k8s 健康探针用)。"""
     return {"status": "ok"}
+
+# ---------- 静态前端 ----------
+# 把 web/ 挂到 /ui,和 API 同源,前端 fetch 用相对路径即可(无 CORS 问题)。
+# html=True:访问 /ui/ 时自动返回 index.html。放在所有 API 路由之后挂载。
+_WEB_DIR = Path(__file__).resolve().parent.parent / "web"
+if _WEB_DIR.is_dir():
+    app.mount("/ui", StaticFiles(directory=_WEB_DIR, html=True), name="ui")

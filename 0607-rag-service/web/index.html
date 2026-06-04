@@ -1,0 +1,604 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>RAG 问答</title>
+  <style>
+    :root {
+      --bg: #f5f6f8;
+      --panel: #ffffff;
+      --border: #e3e6ea;
+      --text: #1f2329;
+      --muted: #8a9099;
+      --accent: #3b6ef0;
+      --accent-soft: #e9f0ff;
+      --user-bubble: #3b6ef0;
+      --assistant-bubble: #ffffff;
+      --danger: #e0524d;
+    }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; }
+    body {
+      font-family: -apple-system, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+      color: var(--text);
+      background: var(--bg);
+      font-size: 14px;
+    }
+    #app {
+      display: grid;
+      grid-template-columns: 260px 1fr 320px;
+      height: 100vh;
+    }
+
+    /* ---------- 左侧栏 ---------- */
+    #sidebar {
+      background: var(--panel);
+      border-right: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+    }
+    .brand {
+      font-weight: 600;
+      font-size: 16px;
+      padding: 16px;
+      border-bottom: 1px solid var(--border);
+    }
+    .section { padding: 14px 16px; border-bottom: 1px solid var(--border); }
+    .section-title {
+      font-size: 12px;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: .5px;
+      margin-bottom: 8px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .file-row { display: flex; gap: 6px; }
+    input[type="file"] { font-size: 12px; width: 100%; }
+    button {
+      font-family: inherit;
+      font-size: 13px;
+      border: 1px solid var(--border);
+      background: var(--panel);
+      color: var(--text);
+      border-radius: 6px;
+      padding: 6px 10px;
+      cursor: pointer;
+      transition: background .15s, border-color .15s;
+    }
+    button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+    button:disabled { opacity: .5; cursor: not-allowed; }
+    button.primary {
+      background: var(--accent);
+      color: #fff;
+      border-color: var(--accent);
+    }
+    button.primary:hover:not(:disabled) { background: #2f5ed0; color: #fff; }
+    .hint { font-size: 12px; color: var(--muted); margin-top: 6px; line-height: 1.5; }
+
+    #convList { flex: 1; overflow-y: auto; padding: 8px; margin: 0; list-style: none; min-height: 0; }
+    .conv-item {
+      padding: 9px 10px;
+      border-radius: 6px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin-bottom: 2px;
+    }
+    .conv-item:hover { background: var(--bg); }
+    .conv-item.active { background: var(--accent-soft); }
+    .conv-title {
+      flex: 1;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .conv-del {
+      border: none;
+      background: transparent;
+      color: var(--muted);
+      padding: 2px 6px;
+      font-size: 14px;
+      opacity: 0;
+    }
+    .conv-item:hover .conv-del { opacity: 1; }
+    .conv-del:hover { color: var(--danger); }
+
+    /* ---------- 中间对话区 ---------- */
+    #chat { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+    #messages { flex: 1; overflow-y: auto; padding: 24px 28px; min-height: 0; }
+    .empty-chat {
+      height: 100%;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      color: var(--muted);
+      gap: 8px;
+    }
+    .msg { display: flex; margin-bottom: 18px; }
+    .msg.user { justify-content: flex-end; }
+    .bubble {
+      max-width: 78%;
+      padding: 11px 14px;
+      border-radius: 12px;
+      line-height: 1.65;
+      word-wrap: break-word;
+    }
+    .msg.user .bubble {
+      background: var(--user-bubble);
+      color: #fff;
+      border-bottom-right-radius: 3px;
+      white-space: pre-wrap;
+    }
+    .msg.assistant .bubble {
+      background: var(--assistant-bubble);
+      border: 1px solid var(--border);
+      border-bottom-left-radius: 3px;
+      cursor: default;
+    }
+    .msg.assistant .bubble.active { border-color: var(--accent); }
+    /* markdown 元素 */
+    .bubble p { margin: 0 0 8px; }
+    .bubble p:last-child { margin-bottom: 0; }
+    .bubble h1, .bubble h2, .bubble h3, .bubble h4 { margin: 10px 0 6px; line-height: 1.3; }
+    .bubble h1 { font-size: 18px; } .bubble h2 { font-size: 16px; } .bubble h3 { font-size: 15px; }
+    .bubble ul, .bubble ol { margin: 6px 0; padding-left: 22px; }
+    .bubble li { margin: 2px 0; }
+    .bubble code {
+      background: #f0f1f3; border-radius: 4px; padding: 1px 5px;
+      font-family: "SF Mono", Consolas, monospace; font-size: 12.5px;
+    }
+    .bubble pre {
+      background: #1f2329; color: #e6e6e6; padding: 12px 14px;
+      border-radius: 8px; overflow-x: auto; margin: 8px 0;
+    }
+    .bubble pre code { background: transparent; color: inherit; padding: 0; }
+    sup.cite {
+      color: var(--accent);
+      cursor: pointer;
+      font-weight: 600;
+      padding: 0 1px;
+      user-select: none;
+    }
+    sup.cite:hover { text-decoration: underline; }
+
+    .typing { display: inline-flex; gap: 4px; align-items: center; color: var(--muted); }
+    .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--muted); animation: blink 1.2s infinite; }
+    .dot:nth-child(2) { animation-delay: .2s; } .dot:nth-child(3) { animation-delay: .4s; }
+    @keyframes blink { 0%, 60%, 100% { opacity: .25; } 30% { opacity: 1; } }
+
+    /* 输入区 */
+    #composer { border-top: 1px solid var(--border); padding: 14px 20px; display: flex; gap: 10px; background: var(--panel); }
+    #questionInput {
+      flex: 1; resize: none; border: 1px solid var(--border); border-radius: 8px;
+      padding: 10px 12px; font-family: inherit; font-size: 14px; line-height: 1.5;
+      max-height: 140px;
+    }
+    #questionInput:focus { outline: none; border-color: var(--accent); }
+
+    /* ---------- 右侧引用栏 ---------- */
+    #sourcesPanel { background: var(--panel); border-left: 1px solid var(--border); display: flex; flex-direction: column; min-height: 0; }
+    .sources-header { font-weight: 600; padding: 16px; border-bottom: 1px solid var(--border); }
+    #sourcesList { flex: 1; overflow-y: auto; padding: 12px; min-height: 0; }
+    .sources-empty { color: var(--muted); font-size: 13px; padding: 24px 16px; text-align: center; line-height: 1.6; }
+    .source-card {
+      border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; margin-bottom: 10px;
+      transition: border-color .15s, box-shadow .15s;
+    }
+    .source-card.highlight { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+    .source-card .sc-head { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+    .sc-badge {
+      background: var(--accent); color: #fff; font-size: 11px; font-weight: 600;
+      border-radius: 4px; padding: 1px 6px; flex-shrink: 0;
+    }
+    .sc-file { font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .sc-meta { font-size: 11px; color: var(--muted); margin-bottom: 6px; }
+    .sc-content { font-size: 12.5px; line-height: 1.6; color: #444; max-height: 120px; overflow-y: auto; white-space: pre-wrap; }
+
+    .toast {
+      position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+      background: #1f2329; color: #fff; padding: 10px 16px; border-radius: 8px;
+      font-size: 13px; opacity: 0; transition: opacity .2s; pointer-events: none; z-index: 10;
+    }
+    .toast.show { opacity: 1; }
+    .toast.error { background: var(--danger); }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <!-- 左:上传 + 会话列表 -->
+    <aside id="sidebar">
+      <div class="brand">RAG 问答</div>
+
+      <div class="section">
+        <div class="section-title">上传文档</div>
+        <div class="file-row">
+          <input type="file" id="fileInput" accept=".txt,.md,.markdown,.pdf" />
+        </div>
+        <button id="uploadBtn" class="primary" style="width:100%; margin-top:8px;">上传并入库</button>
+        <div id="uploadStatus" class="hint"></div>
+      </div>
+
+      <div class="section" style="flex:1; display:flex; flex-direction:column; min-height:0; padding-bottom:0;">
+        <div class="section-title">
+          <span>对话</span>
+          <button id="newConvBtn" style="padding:3px 8px;">+ 新对话</button>
+        </div>
+        <ul id="convList"></ul>
+      </div>
+    </aside>
+
+    <!-- 中:消息流 + 输入 -->
+    <main id="chat">
+      <div id="messages"></div>
+      <form id="composer">
+        <textarea id="questionInput" rows="1" placeholder="输入问题，Enter 发送，Shift+Enter 换行"></textarea>
+        <button type="submit" id="sendBtn" class="primary">发送</button>
+      </form>
+    </main>
+
+    <!-- 右:引用来源 -->
+    <aside id="sourcesPanel">
+      <div class="sources-header">引用来源</div>
+      <div id="sourcesList">
+        <div class="sources-empty">提问后,这里会显示答案引用的文档片段。点击答案里的 [n] 可定位到对应来源。</div>
+      </div>
+    </aside>
+  </div>
+
+  <div id="toast" class="toast"></div>
+
+  <script>
+  "use strict";
+
+  // ============ 状态 ============
+  let currentConversationId = null;
+  // 每条 assistant 消息的 sources,按渲染顺序存;气泡上记 data-msg-index 指过来
+  const messageSources = [];
+
+  // ============ DOM ============
+  const $ = (sel) => document.querySelector(sel);
+  const messagesEl = $("#messages");
+  const convListEl = $("#convList");
+  const sourcesListEl = $("#sourcesList");
+  const questionInput = $("#questionInput");
+  const sendBtn = $("#sendBtn");
+
+  // ============ 工具 ============
+  function toast(msg, isError = false) {
+    const el = $("#toast");
+    el.textContent = msg;
+    el.className = "toast show" + (isError ? " error" : "");
+    setTimeout(() => { el.className = "toast"; }, 2600);
+  }
+
+  async function postJSON(url, body) {
+    const r = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) throw new Error(await errDetail(r));
+    return r.json();
+  }
+  async function errDetail(r) {
+    try { const e = await r.json(); return e.detail || ("HTTP " + r.status); }
+    catch { return "HTTP " + r.status; }
+  }
+
+  function escapeHtml(s) {
+    return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  }
+
+  // ============ 极简 Markdown 渲染(输入已转义) ============
+  function inlineMd(s) {
+    // 行内代码
+    s = s.replace(/`([^`]+)`/g, (_, c) => `<code>${c}</code>`);
+    // 加粗
+    s = s.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+    // 链接 [文字](http...)
+    s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,
+      '<a href="$2" target="_blank" rel="noopener">$1</a>');
+    // 引用 [n] → 可点击(放在链接之后,剩下的纯数字方括号才是引用)
+    s = s.replace(/\[(\d+)\]/g, '<sup class="cite" data-ref="$1">[$1]</sup>');
+    return s;
+  }
+
+  function renderMarkdown(text) {
+    const lines = escapeHtml(text).split("\n");
+    let html = "", i = 0;
+    const isFence = (l) => /^```/.test(l.trim());
+    const isHeading = (l) => /^(#{1,6})\s+/.test(l);
+    const isUl = (l) => /^\s*[-*]\s+/.test(l);
+    const isOl = (l) => /^\s*\d+\.\s+/.test(l);
+
+    while (i < lines.length) {
+      const line = lines[i];
+      if (isFence(line)) {                       // 代码块
+        const buf = []; i++;
+        while (i < lines.length && !isFence(lines[i])) { buf.push(lines[i]); i++; }
+        i++;
+        html += `<pre><code>${buf.join("\n")}</code></pre>`;
+        continue;
+      }
+      const h = line.match(/^(#{1,6})\s+(.*)$/);  // 标题
+      if (h) { const lv = h[1].length; html += `<h${lv}>${inlineMd(h[2])}</h${lv}>`; i++; continue; }
+      if (isUl(line)) {                           // 无序列表
+        const items = [];
+        while (i < lines.length && isUl(lines[i])) { items.push(`<li>${inlineMd(lines[i].replace(/^\s*[-*]\s+/, ""))}</li>`); i++; }
+        html += `<ul>${items.join("")}</ul>`; continue;
+      }
+      if (isOl(line)) {                           // 有序列表
+        const items = [];
+        while (i < lines.length && isOl(lines[i])) { items.push(`<li>${inlineMd(lines[i].replace(/^\s*\d+\.\s+/, ""))}</li>`); i++; }
+        html += `<ol>${items.join("")}</ol>`; continue;
+      }
+      if (line.trim() === "") { i++; continue; }  // 空行
+      const para = [];                            // 段落
+      while (i < lines.length && lines[i].trim() !== "" &&
+             !isFence(lines[i]) && !isHeading(lines[i]) && !isUl(lines[i]) && !isOl(lines[i])) {
+        para.push(lines[i]); i++;
+      }
+      html += `<p>${inlineMd(para.join("<br>"))}</p>`;
+    }
+    return html;
+  }
+
+  // ============ 渲染消息 ============
+  function clearMessages() {
+    messagesEl.innerHTML = "";
+    messageSources.length = 0;
+  }
+
+  function showEmptyChat() {
+    messagesEl.innerHTML =
+      `<div class="empty-chat"><div style="font-size:32px">💬</div>` +
+      `<div>开始一个新对话,或从左侧选择历史会话</div></div>`;
+  }
+
+  function appendUserMessage(text) {
+    const wrap = document.createElement("div");
+    wrap.className = "msg user";
+    const bubble = document.createElement("div");
+    bubble.className = "bubble";
+    bubble.textContent = text;          // 用户内容不渲染 markdown,纯文本
+    wrap.appendChild(bubble);
+    messagesEl.appendChild(wrap);
+    scrollToBottom();
+  }
+
+  // 返回 bubble 元素,便于"思考中"占位后续替换
+  function appendAssistantMessage(html, sources) {
+    const wrap = document.createElement("div");
+    wrap.className = "msg assistant";
+    const bubble = document.createElement("div");
+    bubble.className = "bubble";
+    bubble.innerHTML = html;
+    if (sources) {
+      const idx = messageSources.push(sources) - 1;
+      bubble.dataset.msgIndex = String(idx);
+    }
+    wrap.appendChild(bubble);
+    messagesEl.appendChild(wrap);
+    scrollToBottom();
+    return bubble;
+  }
+
+  function appendTyping() {
+    return appendAssistantMessage(
+      `<span class="typing"><span class="dot"></span><span class="dot"></span><span class="dot"></span></span>`,
+      null
+    );
+  }
+
+  function scrollToBottom() { messagesEl.scrollTop = messagesEl.scrollHeight; }
+
+  // ============ 引用侧栏 ============
+  function renderSources(sources) {
+    if (!sources || sources.length === 0) {
+      sourcesListEl.innerHTML = `<div class="sources-empty">本条回答没有引用来源。</div>`;
+      return;
+    }
+    sourcesListEl.innerHTML = sources.map((s) => `
+      <div class="source-card" data-ref="${s.id}">
+        <div class="sc-head">
+          <span class="sc-badge">[${s.id}]</span>
+          <span class="sc-file" title="${escapeHtml(s.document_filename)}">${escapeHtml(s.document_filename)}</span>
+        </div>
+        <div class="sc-meta">chunk #${s.chunk_index} · 相关度 ${s.similarity ?? "-"}</div>
+        <div class="sc-content">${escapeHtml(s.content)}</div>
+      </div>
+    `).join("");
+  }
+
+  function highlightSource(ref) {
+    const card = sourcesListEl.querySelector(`.source-card[data-ref="${ref}"]`);
+    if (!card) return;
+    sourcesListEl.querySelectorAll(".source-card.highlight").forEach((c) => c.classList.remove("highlight"));
+    card.classList.add("highlight");
+    card.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }
+
+  function setActiveBubble(bubble) {
+    messagesEl.querySelectorAll(".bubble.active").forEach((b) => b.classList.remove("active"));
+    if (bubble) bubble.classList.add("active");
+  }
+
+  // 点击答案里的 [n] / 点击某条 assistant 气泡 → 联动右栏
+  messagesEl.addEventListener("click", (e) => {
+    const bubble = e.target.closest(".msg.assistant .bubble");
+    if (!bubble || bubble.dataset.msgIndex === undefined) return;
+    const sources = messageSources[Number(bubble.dataset.msgIndex)];
+    setActiveBubble(bubble);
+    renderSources(sources);
+    const cite = e.target.closest("sup.cite");
+    if (cite) highlightSource(cite.dataset.ref);
+  });
+
+  // ============ 会话列表 ============
+  async function loadConversations() {
+    try {
+      const convs = await (await fetch("/conversations")).json();
+      convListEl.innerHTML = convs.map((c) => `
+        <li class="conv-item ${c.id === currentConversationId ? "active" : ""}" data-id="${c.id}">
+          <span class="conv-title">${escapeHtml(c.title || "未命名对话")}</span>
+          <button class="conv-del" data-id="${c.id}" title="删除">×</button>
+        </li>
+      `).join("");
+    } catch (err) {
+      toast("加载会话列表失败:" + err.message, true);
+    }
+  }
+
+  convListEl.addEventListener("click", async (e) => {
+    const del = e.target.closest(".conv-del");
+    if (del) {
+      e.stopPropagation();
+      await deleteConversation(del.dataset.id);
+      return;
+    }
+    const item = e.target.closest(".conv-item");
+    if (item) await openConversation(item.dataset.id);
+  });
+
+  async function openConversation(id) {
+    try {
+      const r = await fetch("/conversations/" + id);
+      if (!r.ok) throw new Error(await errDetail(r));
+      const conv = await r.json();
+      currentConversationId = conv.id;
+      clearMessages();
+      sourcesListEl.innerHTML = `<div class="sources-empty">点击某条回答或其中的 [n] 查看引用来源。</div>`;
+      for (const m of conv.messages) {
+        if (m.role === "user") appendUserMessage(m.content);
+        else appendAssistantMessage(renderMarkdown(m.content), m.sources || []);
+      }
+      if (conv.messages.length === 0) showEmptyChat();
+      loadConversations();
+    } catch (err) {
+      toast("打开会话失败:" + err.message, true);
+    }
+  }
+
+  async function deleteConversation(id) {
+    try {
+      const r = await fetch("/conversations/" + id, { method: "DELETE" });
+      if (!r.ok && r.status !== 204) throw new Error(await errDetail(r));
+      if (id === currentConversationId) startNewConversation();
+      loadConversations();
+      toast("已删除会话");
+    } catch (err) {
+      toast("删除失败:" + err.message, true);
+    }
+  }
+
+  function startNewConversation() {
+    currentConversationId = null;     // 服务端在首次提问时自动建会话
+    clearMessages();
+    showEmptyChat();
+    sourcesListEl.innerHTML = `<div class="sources-empty">提问后,这里会显示答案引用的文档片段。</div>`;
+    loadConversations();
+    questionInput.focus();
+  }
+
+  $("#newConvBtn").addEventListener("click", startNewConversation);
+
+  // ============ 发送提问 ============
+  async function sendMessage() {
+    const question = questionInput.value.trim();
+    if (!question) return;
+
+    // 首次提问前清掉空状态占位
+    if (!messagesEl.querySelector(".msg")) clearMessages();
+
+    questionInput.value = "";
+    autoGrow();
+    appendUserMessage(question);
+    setSending(true);
+    const typing = appendTyping();
+
+    try {
+      const res = await postJSON("/query", {
+        question,
+        conversation_id: currentConversationId,  // null → 服务端建新会话
+      });
+      const isNew = currentConversationId === null;
+      currentConversationId = res.conversation_id;
+
+      // 用真正答案替换"思考中"占位
+      typing.innerHTML = renderMarkdown(res.answer);
+      const idx = messageSources.push(res.sources) - 1;
+      typing.dataset.msgIndex = String(idx);
+      setActiveBubble(typing);
+      renderSources(res.sources);
+      scrollToBottom();
+
+      if (isNew) loadConversations();   // 新会话:刷新左侧列表(标题已生成)
+    } catch (err) {
+      typing.innerHTML = `<span style="color:var(--danger)">出错了:${escapeHtml(err.message)}</span>`;
+      toast("提问失败:" + err.message, true);
+    } finally {
+      setSending(false);
+    }
+  }
+
+  function setSending(on) {
+    sendBtn.disabled = on;
+    questionInput.disabled = on;
+    sendBtn.textContent = on ? "生成中…" : "发送";
+    if (!on) questionInput.focus();
+  }
+
+  $("#composer").addEventListener("submit", (e) => { e.preventDefault(); sendMessage(); });
+
+  // Enter 发送,Shift+Enter 换行
+  questionInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+  });
+  // 输入框自动增高
+  function autoGrow() {
+    questionInput.style.height = "auto";
+    questionInput.style.height = Math.min(questionInput.scrollHeight, 140) + "px";
+  }
+  questionInput.addEventListener("input", autoGrow);
+
+  // ============ 上传 ============
+  $("#uploadBtn").addEventListener("click", async () => {
+    const fileInput = $("#fileInput");
+    const file = fileInput.files[0];
+    const statusEl = $("#uploadStatus");
+    if (!file) { toast("请先选择文件", true); return; }
+
+    const btn = $("#uploadBtn");
+    btn.disabled = true;
+    statusEl.textContent = `上传中:${file.name}(embedding 可能较慢,请稍候)`;
+
+    try {
+      const fd = new FormData();
+      fd.append("file", file);
+      const r = await fetch("/upload", { method: "POST", body: fd });
+      if (!r.ok) throw new Error(await errDetail(r));
+      const data = await r.json();
+      statusEl.textContent = `✅ ${data.filename} 已入库,切出 ${data.chunk_count} 个 chunk`;
+      fileInput.value = "";
+      toast("上传成功");
+    } catch (err) {
+      statusEl.textContent = `❌ 上传失败:${err.message}`;
+      toast("上传失败:" + err.message, true);
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  // ============ 初始化 ============
+  showEmptyChat();
+  loadConversations();
+  questionInput.focus();
+  </script>
+</body>
+</html>
