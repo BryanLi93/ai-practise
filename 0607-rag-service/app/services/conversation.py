@@ -8,13 +8,17 @@ from app.models import Conversation, Message
 
 async def create_conversation(
     db: AsyncSession,
-    title: str | None = None
+    title: str | None = None,
+    commit: bool = True
 ) -> Conversation:
-    """创建新会话。"""
+    """创建新会话。commit=False 时只 flush 拿到 id,由调用方统一提交(用于和消息同一事务)。"""
     conv = Conversation(title=title)
     db.add(conv)
-    await db.commit()
-    await db.refresh(conv) # 刷新拿到数据库生成的 id 和 created_at
+    if commit:
+        await db.commit()
+        await db.refresh(conv) # 刷新拿到数据库生成的 id 和 created_at
+    else:
+        await db.flush()       # 拿到 python 端生成的 id,但不提交
     return conv
 
 async def delete_conversation(
