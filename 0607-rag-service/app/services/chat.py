@@ -1,11 +1,10 @@
 import uuid
 import logging
 
-from google.genai import types
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Message
-from app.embedding import get_client as get_genai_client
+from app.llm import get_openai_client
 from app.config import settings
 from app.services.retrieval import query as run_query
 from app.services import conversation as conv_service
@@ -36,24 +35,25 @@ REWRITE_USER_PROMPT_TEMPLATE = """
 
 async def rewrite_query(question: str, recent_messages: list[Message]) -> str:
     # 查询重写
-    client = get_genai_client()
+    client = get_openai_client()
     messages = [f"{m.role}:{m.content}" for m in recent_messages]
 
     user_prompt = REWRITE_USER_PROMPT_TEMPLATE.format(question=question, messages="\n".join(messages))
-    response = await client.aio.models.generate_content(
+    response = await client.chat.completions.create(
         model=settings.chat_model,
-        contents=user_prompt,
-        config=types.GenerateContentConfig(
-            system_instruction=REWRITE_SYSTEM_PROMPT,
-            temperature=0.1,
-            max_output_tokens=256,
-        )
+        messages=[
+            {"role": "system", "content": REWRITE_SYSTEM_PROMPT},
+            {"role": "user", "content": user_prompt},
+        ],
+        temperature=0.1,
+        max_tokens=256,
     )
 
-    if not response.text:
+    content = response.choices[0].message.content
+    if not content:
         raise RuntimeError("LLM returned empty response")
 
-    return response.text.strip()
+    return content.strip()
 
 async def handle_chat(
     db: AsyncSession,

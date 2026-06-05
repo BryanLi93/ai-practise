@@ -8,13 +8,12 @@ from dataclasses import dataclass
 import asyncio
 import re
 
-from google import genai
-from google.genai import types
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, text as sql_text
 from sqlalchemy.orm import selectinload
 
-from app.embedding import embed_query, get_client as get_genai_client
+from app.embedding import embed_query
+from app.llm import get_openai_client
 from app.models import Chunk, Document, Message
 from app.config import settings
 from app.rerank import rerank as do_rerank
@@ -291,8 +290,7 @@ def _format_context(retrieved: list[RetrievedChunk]) -> str:
 
 # ---------- 内部:生成 ----------
 async def _generate_answer(question: str, context: str, recent_messages: list[Message]) -> str:
-    client = get_genai_client()
-
+    client = get_openai_client()
 
     user_prompt = USER_PROMPT_TEMPLATE.format(context=context, question=question)
 
@@ -303,20 +301,21 @@ async def _generate_answer(question: str, context: str, recent_messages: list[Me
         history_prompt = HISTORY_PROMPT_TEMPLATE.format(history=history)
         user_prompt = history_prompt + user_prompt
 
-    response = await client.aio.models.generate_content(
+    response = await client.chat.completions.create(
         model=settings.chat_model,
-        contents=user_prompt,
-        config=types.GenerateContentConfig(
-            system_instruction=SYSTEM_PROMPT,
-            temperature=0.1,
-            max_output_tokens=1024,
-        ),
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": user_prompt},
+        ],
+        temperature=0.1,
+        max_tokens=1024,
     )
 
-    if not response.text:
+    content = response.choices[0].message.content
+    if not content:
         raise RuntimeError("LLM returned empty response")
 
-    return response.text.strip()
+    return content.strip()
 
 # ---------- 对外 API ----------
 async def query(

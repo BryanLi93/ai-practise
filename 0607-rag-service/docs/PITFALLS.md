@@ -82,6 +82,7 @@
 
 - **现象**:`httpcore.ConnectError`,traceback 里出现 `http_proxy.py ... start_tls`。
 - **原因**:本地代理(`127.0.0.1:7897`)那一刻不可用。中国大陆访问 Gemini 必须走代理,代理一断,所有 LLM/embedding 调用都连不上。
+- **更新(已迁移)**:正因为 Gemini 直连要代理且常断连,后来整体切到 **OpenAI 兼容中转站**(国内可直连),LLM/embedding 不再依赖这个代理,这类 `ConnectError` 基本消失。此条作为历史排查记录保留。
 - **排查**:
   ```bash
   nc -z 127.0.0.1 7897        # 端口在不在

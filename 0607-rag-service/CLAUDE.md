@@ -49,13 +49,13 @@
 | 数据库 | PostgreSQL 16 | Docker,端口 **5433**(避开 ai_registry 项目的 5432) |
 | 向量扩展 | pgvector | `halfvec(1536)` + HNSW 索引 |
 | 中文分词 | zhparser(基于 SCWS) | 自编译进 pgvector 镜像 |
-| Embedding | Gemini `gemini-embedding-001` | 1536 维(MRL 截断),Free tier |
-| Chat | Gemini `gemini-2.5-flash` | Free tier |
-| LLM SDK | `google-genai`(原生) | embedding 必须用原生,不能用 OpenAI 兼容层 |
+| Embedding | OpenAI `text-embedding-3-small` | 1536 维(原生);经 OpenAI 兼容中转站 |
+| Chat | `gpt-5.4` | 经 OpenAI 兼容中转站 |
+| LLM SDK | `openai`(AsyncOpenAI) | chat + embedding 都走中转站(自定义 `base_url`) |
 | Rerank | `BAAI/bge-reranker-v2-m3` | 经 `sentence-transformers` 加载,本地推理 |
 | 限流重试 | `tenacity` | 指数退避 |
 | 分块 | `langchain-text-splitters` | RecursiveCharacterTextSplitter |
-| token 估算 | `tiktoken` | cl100k_base(对 Gemini 是近似值) |
+| token 估算 | `tiktoken` | cl100k_base(对 gpt-5.4 是近似值) |
 | PDF 解析 | `pymupdf`(fitz) | |
 | 容器 | Docker Compose + OrbStack | |
 
@@ -63,7 +63,9 @@
 - pip 用清华镜像:`pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple`
 - HuggingFace 模型下载用国内镜像:`.env` 里设 `HF_ENDPOINT=https://hf-mirror.com`
 - 两个 Postgres 实例:`ai_registry` 项目在 5432,本 RAG 项目在 5433
-- 没有 OpenAI key,chat 走 Gemini;Free tier embedding 限流约 **5 RPM**
+- chat + embedding 都走 **OpenAI 兼容中转站**:`.env` 配 `OPENAI_API_KEY` + `OPENAI_BASE_URL`(通常以 `/v1` 结尾);限流取决于中转站,远比原 Gemini free tier 宽松
+- 改 `.env` 后**必须手动重启服务**:`settings = Settings()` 进程启动只读一次,reload 只监听 `.py` 不监听 `.env`(踩过坑)
+- ⚠️ 换 embedding 模型 = 旧向量作废,**必须清库重新入库**(向量跨模型不可比)
 
 ---
 
@@ -71,8 +73,9 @@
 
 > 完整理由在 `docs/DECISIONS.md`(项目核心知识点 + 面试考点)。这里只列标题,用到某条按编号去查。
 
-- **向量与存储**:1 Matryoshka 截断 3072→1536 / 2 halfvec 而非 vector / 3 维度是数据库的契约
-- **Embedding 调用**:4 必须用 google-genai 原生 SDK(task_type)/ 5 Asymmetric embedding / 6 Free tier 限流(批量+节流+退避)/ 7 阻塞调用 await、ML 推理用 asyncio.to_thread
+- **向量与存储**:1 维度 1536(text-embedding-3-small 原生;-3-large 才 MRL 截断)/ 2 halfvec 而非 vector / 3 维度是数据库的契约
+- **Embedding 调用**:4 ~~必须用 google-genai 原生~~→已迁移 OpenAI 兼容中转站(见 41)/ 5 ~~Asymmetric task_type~~→OpenAI 对称无 task_type(概念仍是考点)/ 6 限流处理(批量+节流 0.5s+退避)/ 7 阻塞调用 await、ML 推理用 asyncio.to_thread
+- **Provider 迁移**:41 Gemini 原生 → OpenAI 兼容中转站(chat=gpt-5.4 / embedding=text-embedding-3-small,统一 openai SDK)
 - **检索(三段式)**:8 pgvector 而非 ChromaDB / 9 tsvector+GIN 而非 rank_bm25 / 10 中文分词 zhparser / 11 content_tsv 用 Generated Column / 12 OR 风格+ts_rank_cd / 13 RRF 而非加权求和 / 14 召回候选=top_k×4 / 15 三段式架构 / 16 Rerank 用 BGE 本地而非 Cohere / 17 Bi-encoder vs Cross-encoder / 18 三个常量的漏斗
 - **生成**:19 system_instruction 参数 / 20 temperature=0.1 / 21 强 prompt+few-shot / 22 chunks 用 `---` 分隔
 - **引用溯源**:23 `[n]`+sources 数组 / 24 难点是引用正确性(faithfulness)
@@ -87,7 +90,7 @@
 
 ```
 0607-rag-service/                # 注意:git 根在上一级 ai-practise
-├── .env / .env.example          # GOOGLE_API_KEY, DATABASE_URL, EMBEDDING_DIM, HF_ENDPOINT 等
+├── .env / .env.example          # OPENAI_API_KEY, OPENAI_BASE_URL, CHAT_MODEL, EMBEDDING_MODEL, DATABASE_URL, HF_ENDPOINT 等
 ├── CLAUDE.md                    # 本文件
 ├── README.md
 ├── docker-compose.yml           # postgres 服务(build 自定义镜像)
@@ -101,7 +104,8 @@
 │   ├── db.py                    # async engine + AsyncSessionLocal + get_db 依赖
 │   ├── models.py                # Document, Chunk, Conversation, Message(4 张表都已建)
 │   ├── schemas.py               # 所有 Pydantic 请求/响应模型
-│   ├── embedding.py             # Gemini embedding 封装(批量+节流+重试+task_type)
+│   ├── llm.py                   # get_openai_client():AsyncOpenAI 单例(中转站,chat+embedding 共用)
+│   ├── embedding.py             # OpenAI embedding 封装(批量+节流+重试,无 task_type)
 │   ├── chunking.py              # RecursiveCharacterTextSplitter + token 估算
 │   ├── parsing.py               # 文件解析层(PDF / txt / md → str)
 │   ├── rerank.py                # BGE-reranker 加载与打分(CrossEncoder)
@@ -112,6 +116,7 @@
 │   └── services/
 │       ├── ingest.py            # 切块 → embedding → 事务写入
 │       ├── retrieval.py         # 混合检索 + RRF + rerank + 生成
+│       ├── chat.py              # handle_chat 多轮编排 + rewrite_query + 单事务落库
 │       └── conversation.py      # 会话 CRUD + add_message
 ├── docs/                        # 学习者自建的复习材料
 │   ├── ARCHITECTURE.md          # 分层架构图 + 时序图(Mermaid)
@@ -173,6 +178,7 @@
   - 内置极简 Markdown 渲染器(不依赖 CDN);答案 `[n]` 可点击联动右侧来源高亮
   - `app/main.py` 用 `StaticFiles(html=True)` 把 `web/` 挂到 `/ui`(与 API 同源,无 CORS);访问 `http://127.0.0.1:8000/ui/`
   - "新对话"只清前端状态,服务端在首次 `/query` 才建会话(复用 Day 2 单事务,不留空会话)
+- **Provider 迁移(Day 4 前插入)— 已完成**:Gemini 原生 SDK 老断连,chat + embedding 全面切到 **OpenAI 兼容中转站**(`app/llm.py` 的 `get_openai_client()` 单例;chat=`gpt-5.4`,embedding=`text-embedding-3-small`,均 .env 配)。换 embedding 模型已清库重灌。
 
 ---
 
@@ -182,7 +188,7 @@
 |---|---|---|
 | ~~Day 2~~(已完成) | Query Rewriting + 历史注入 | ✅ 已实现:`get_recent_messages` → `rewrite_query` → 解耦 search_query/question → 历史进生成 prompt → `handle_chat` 编排 + 单事务。详见第 5 节与 `docs/PITFALLS.md` |
 | ~~Day 3~~(已完成) | 简单前端 | ✅ `web/index.html` 三栏(上传/对话/引用),内置 Markdown 渲染,挂在 `/ui`。详见第 5 节 |
-| **Day 4(下一步)** | 流式输出 | SSE + FastAPI StreamingResponse + Gemini generate_content_stream + 前端 EventSource。建议单独做,涉及前后端两层 |
+| **Day 4(下一步)** | 流式输出 | SSE + FastAPI StreamingResponse + OpenAI `chat.completions.create(stream=True)` + 前端 fetch ReadableStream(非 EventSource,因 /query 是 POST 带 body)。建议单独做,涉及前后端两层 |
 | Day 5 | 结构化日志 | JSON 日志 + trace_id 中间件 + 异常分层(401/403/404/422/429/500/502/503)+ 关键路径 timing |
 | Day 6 | 基础监控 | /metrics 端点:QPS/延迟/错误率、token 用量、召回数分布、rerank score 分布。可选接 prometheus_client |
 | Day 7 | Docker 整合 | FastAPI 也容器化,compose 编排两服务,HF 模型缓存 volume 持久化,一键 `docker compose up` |
@@ -197,13 +203,13 @@
 ## 7. 已知限制与技术债
 
 - **PDF 解析对扫描件无效**:无文本层需 OCR,超出当前范围
-- **Free tier 限流**:embedding ~5 RPM,大文档入库慢;长对话多一次 query rewrite 调用,更吃配额
+- **中转站限流/稳定性**:限流取决于服务商;chat 长生成仍可能断连,大文档入库受其约束;长对话多一次 query rewrite 调用,更吃用量
 - **`similarity` 字段语义模糊**:经 RRF 后是 `min(1.0, rrf_score*30)`,既非 cosine 也非纯 RRF;生产建议改用 rank
 - ~~**RAG 失败留空会话**~~:**已于 Day 2 修复**——写库全部移到 RAG 成功之后,`handle_chat` 单事务一次 commit,失败回滚不留空会话
-- **LLM 调用无重试**:`rewrite_query` / `_generate_answer` 的 `generate_content` 是裸调,不像 `embedding.py` 有 tenacity 退避;free tier 撞 429 或代理抖动直接 502。生产需补(暂列为 Day 2 遗留优化项 ③)
+- **chat 调用无重试**:`rewrite_query` / `_generate_answer` 的 `chat.completions.create` 是裸调,不像 `embedding.py` 有 tenacity 退避;中转站撞 429/断连直接 502。生产需补(可复用 embedding 的退避思路,异常类型用 `openai.APIError`)
 - **标题孤儿问题**:Markdown 标题可能被单独切成一个无信息 chunk(如 `## 检索流程`);未处理,Week 13-14 评测暴露后再优化(可选 MarkdownHeaderTextSplitter)
 - **chunk 策略是"凑合能用"**:chunk_size=500/overlap=50 是起步值,未调优;overlap 仅在"切碎超长段落"时生效,纯段落合并不加 overlap
-- **小知识库混合检索优势不明显**:当前测试集 Gemini embedding 已很强,混合检索主要起"补强"而非"救场"作用;但多语言/长尾场景仍需要
+- **小知识库混合检索优势不明显**:当前测试集 embedding 已很强,混合检索主要起"补强"而非"救场"作用;但多语言/长尾场景仍需要
 - **无用户系统**:用 conversation_id 隔离,未绑定用户(学习阶段有意跳过)
 - **无 DB 迁移工具**:用 `create_all`,生产应上 Alembic
 

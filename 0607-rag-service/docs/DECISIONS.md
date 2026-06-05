@@ -1,17 +1,17 @@
-# 技术决策与理由（38 条）
+# 技术决策与理由（41 条）
 
 > 项目的核心知识点,也是面试高频考点。每条都是"踩过/讨论过"才定下来的。
 > CLAUDE.md 第 3 节只保留标题索引,完整理由在这里;用到某条时按编号查。
 
 ## 向量与存储
-1. **Matryoshka 截断 3072 → 1536**:`gemini-embedding-001` 默认 3072 维,但 pgvector 的 HNSW/IVFFlat 索引上限是 2000 维。`halfvec` 半精度类型把索引上限提到 4000,1536 是"存储成本 / 质量 / 索引约束 / 行业惯例"的交集。该模型是 MRL 模型,截断到 1536 质量损失极小。
+1. **目标维度 1536**:pgvector 的 HNSW/IVFFlat 索引上限是 2000 维,`halfvec` 半精度把上限提到 4000;1536 是"存储成本 / 质量 / 索引约束 / 行业惯例"的交集。现用 `text-embedding-3-small`,**原生就是 1536,无需截断**。OpenAI `text-embedding-3` 系列同样是 MRL(Matryoshka)模型:若换成 `text-embedding-3-large`(原生 3072),用 `dimensions=1536` 截断,语义损失极小——这正是早期用 Gemini(3072→1536)时的同一招。
 2. **`halfvec` 而非 `vector`**:float16 半精度,存储减半,索引性能更好;在 1536 维下质量损失可忽略。
 3. **维度是数据库的契约**:模型和维度一旦定死,改动需要全量重新 embed。入库时把 `embedding_model` 和 `dim` 记进 metadata,便于未来迁移。
 
 ## Embedding 调用
-4. **embedding 必须用 `google-genai` 原生 SDK**:OpenAI 兼容层缺 `task_type` 参数。
-5. **Asymmetric embedding**:入库 chunk 用 `task_type=RETRIEVAL_DOCUMENT`,查询用 `RETRIEVAL_QUERY`。同模型针对"文档"和"问题"两种角色生成更适合检索的向量,是几乎免费的召回质量提升(OpenAI text-embedding-3 没有)。
-6. **Free tier 限流处理**:批量调用(单批 ≤100)+ 批间主动节流(13s)+ tenacity 指数退避双保险。批量是必须而非优化——单条串行会卡几十秒。
+4. ~~**embedding 必须用 `google-genai` 原生 SDK**(因 task_type 兼容层缺失)~~——已废:整体迁到 OpenAI(本就无 task_type),chat + embedding 统一 `openai` SDK,见 #41。
+5. **Asymmetric vs Symmetric embedding(概念仍是考点)**:Gemini 是**非对称**——入库用 `task_type=RETRIEVAL_DOCUMENT`、查询用 `RETRIEVAL_QUERY`,把"文档"和"问题"投到更易匹配的空间,几乎免费的召回提升。**OpenAI `text-embedding-3` 是对称的**,query 和 document 用同一编码、无 task_type。迁移后现实现是对称;被问到要能讲清两者区别和取舍。
+6. **限流处理**:批量调用(单批 ≤100)+ 批间主动节流 + tenacity 指数退避双保险。批量是必须而非优化——单条串行会卡几十秒。节流值随 provider 变:Gemini free tier 要 13s(~5 RPM),OpenAI 中转站宽松,降到 0.5s,主要靠退避兜底;重试异常类型用 `openai.APIError`。
 7. **embedding 是同步阻塞调用要 await**;chat 同理。ML 本地推理(rerank)用 `asyncio.to_thread` 推到线程池,避免阻塞事件循环。
 
 ## 检索(三段式:召回 → 精排 → 生成)
@@ -28,7 +28,7 @@
 18. **`RERANK_CANDIDATES=20` 是 rerank 入口宽度**;`top_k` 是 rerank 出口/LLM 入口宽度。三个常量是逐级缩小的漏斗:`top_k×4`(每路召回)→ 20(RRF 出口)→ 5(rerank 出口)。
 
 ## 生成
-19. **system prompt 用 `system_instruction` 参数**,不拼进 contents:缓存友好、模型对齐、服从度更高。
+19. **system prompt 走独立的 system 角色**,不拼进用户内容:缓存友好、模型对齐、服从度更高。当前用 OpenAI 接口,即 `messages=[{"role":"system",...},{"role":"user",...}]`(早期 Gemini 是 `system_instruction` 参数,同一思想的不同写法)。
 20. **temperature=0.1**:RAG 要忠实不要创意,低温减少幻觉。不写 0.0 因为完全确定性偶尔陷入局部模式。
 21. **强 prompt 约束 + few-shot**:Free tier 的 Flash 服从度不如 Pro,必须用"必须""禁止"级指令 + 示例,才能稳定输出 `[n]` 引用标注。
 22. **chunks 用 `---` 分隔拼 context**:防止 LLM 把不同来源误认为连续段落。
@@ -56,3 +56,6 @@
 36. **`Text` vs `String(n)`**:PG 中两者性能无差,预期长/不确定上限用 `Text`,有业务上限用 `String(n)`。
 37. **service / router 分层**:router 只管 HTTP 协议,业务逻辑在 service;内部用 dataclass 传递,对外用 Pydantic schema。
 38. **全局异常处理器**:兜底未捕获异常,只暴露异常类型名给客户端,完整 traceback 进日志(防信息泄露)。
+
+## Provider 迁移
+41. **Gemini 原生 SDK → OpenAI 兼容中转站**:Gemini 直连常断连,chat + embedding 统一切到中转站(chat=`gpt-5.4` / embedding=`text-embedding-3-small`,统一 `openai` SDK)。一笔带过即可,唯一值得记的技术点:换 embedding 模型会让旧向量作废(跨模型不可比),必须清库重灌——即 #3"维度是契约"的延伸。

@@ -25,7 +25,7 @@ graph TD
     subgraph Capability["能力层 (app)"]
         Parsing[parsing.py<br/>PDF/txt/md→文本]
         Chunking[chunking.py<br/>递归字符切分]
-        Embedding[embedding.py<br/>Gemini embedding]
+        Embedding[embedding.py<br/>OpenAI embedding]
         Rerank[rerank.py<br/>BGE cross-encoder]
     end
 
@@ -36,7 +36,7 @@ graph TD
 
     subgraph Infra["基础设施"]
         PG[(PostgreSQL 16<br/>pgvector + zhparser)]
-        Gemini[Gemini API<br/>embedding-001 / 2.5-flash]
+        Gemini[LLM 中转站<br/>OpenAI 兼容 · gpt-5.4 / text-embedding-3-small]
         BGE[BGE-reranker-v2-m3<br/>本地模型]
     end
 
@@ -62,7 +62,7 @@ sequenceDiagram
     participant I as ingest.py
     participant C as chunking.py
     participant E as embedding.py
-    participant G as Gemini API
+    participant G as LLM 中转站
     participant DB as PostgreSQL
 
     U->>R: POST /upload (file)
@@ -80,9 +80,9 @@ sequenceDiagram
     C-->>I: List[Chunk] (500字符/块, 50重叠)
     I->>E: embed_documents(texts)
     loop 每批 100 条
-        E->>G: embed_content(task_type=RETRIEVAL_DOCUMENT, dim=1536)
+        E->>G: embeddings.create(model=text-embedding-3-small, dimensions=1536)
         G-->>E: embeddings
-        E->>E: sleep 13s 主动节流 (除最后一批)
+        E->>E: sleep 0.5s 主动节流 (除最后一批)
     end
     E-->>I: List[vector]
     I->>DB: add(Document) + flush() 拿自增 id
@@ -101,7 +101,7 @@ sequenceDiagram
     participant R as query.py
     participant S as retrieval.py
     participant E as embedding.py
-    participant G as Gemini API
+    participant G as LLM 中转站
     participant DB as PostgreSQL
     participant K as rerank.py / BGE
 
@@ -109,7 +109,7 @@ sequenceDiagram
     R->>S: run_query(question, top_k)
 
     S->>E: embed_query(question)
-    E->>G: embed_content(task_type=RETRIEVAL_QUERY)
+    E->>G: embeddings.create(model=text-embedding-3-small)
     G-->>E: query_vector
     E-->>S: query_vector
 
@@ -132,7 +132,7 @@ sequenceDiagram
     end
 
     S->>S: _format_context  "[1] ... [2] ..."
-    S->>G: generate_content(system_prompt 强约束 + context)
+    S->>G: chat.completions.create(system 强约束 + user: context)
     G-->>S: answer (带 [n] 引用)
     S-->>R: QueryResult(answer, sources)
     R->>R: 组装 List[Source]

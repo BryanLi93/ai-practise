@@ -7,9 +7,9 @@
 
 ## 0. 电梯陈述(开场 30 秒)
 
-> 我做了一个完整的 RAG 问答服务,技术栈是 FastAPI + PostgreSQL/pgvector + Gemini。
-> 检索是**三段式**:召回用 pgvector 余弦距离加 zhparser 中文分词的 tsvector 做**混合检索**,用 **RRF** 融合两路(因为两路分数量纲不可比);精排用 **BGE-reranker-v2-m3** 这个 cross-encoder 对 top 20 重排;生成用 Gemini Flash,prompt 强约束"只基于 context 回答"并要求 `[n]` 引用标注做溯源。
-> 几个工程细节:embedding 用 **Matryoshka** 把 3072 维截到 1536,因为 pgvector HNSW 索引维度上限是 2000;PDF 解析用 PyMuPDF 加启发式去重复页眉页脚;Gemini free tier 限流用 **tenacity 退避 + 主动节流** 处理。
+> 我做了一个完整的 RAG 问答服务,技术栈是 FastAPI + PostgreSQL/pgvector,LLM 走 **OpenAI 兼容中转站**(chat 用 gpt-5.4,embedding 用 text-embedding-3-small)。
+> 检索是**三段式**:召回用 pgvector 余弦距离加 zhparser 中文分词的 tsvector 做**混合检索**,用 **RRF** 融合两路(因为两路分数量纲不可比);精排用 **BGE-reranker-v2-m3** 这个 cross-encoder 对 top 20 重排;生成用 gpt-5.4,prompt 强约束"只基于 context 回答"并要求 `[n]` 引用标注做溯源。
+> 几个工程细节:embedding 维度选 1536(text-embedding-3-small 原生,正好压在 pgvector HNSW 2000 维上限内);PDF 解析用 PyMuPDF 加启发式去重复页眉页脚;限流用 **tenacity 退避 + 主动节流** 处理。
 
 ---
 
@@ -18,12 +18,12 @@
 **核心**:向量化问题 → 混合召回 → RRF 融合 → 精排 → 拼 context → LLM 生成带引用的答案。
 
 **展开(按时间顺序 6 步)**:
-1. **问题向量化** —— `embed_query` 调 Gemini,`task_type=RETRIEVAL_QUERY`,得到 1536 维向量。
+1. **问题向量化** —— `embed_query` 调 OpenAI `embeddings.create`(text-embedding-3-small),得到 1536 维向量。OpenAI 是对称 embedding,query 和 document 用同一模型,没有 task_type(早期 Gemini 才区分 RETRIEVAL_QUERY/DOCUMENT)。
 2. **两路召回** —— 向量路按 `cosine_distance` 排序取 top 80;关键词路用 zhparser 把问题分词成 `词A | 词B` 的 OR 查询,按 `ts_rank_cd` 排序取 top 80。各自返回 `{chunk_id: 名次}`。
 3. **RRF 融合** —— 对两路并集里每个 chunk 算 `score = Σ 1/(60+rank)`,降序取前 20。
 4. **精排** —— (开启时)BGE cross-encoder 把 query 和每个 chunk 拼一起打分,重排取 top_k;放在 `asyncio.to_thread` 里跑,不阻塞事件循环。
 5. **拼 context** —— 把 chunk 编号成 `[1] ... [2] ...`。
-6. **生成** —— Gemini Flash,system prompt 强约束只用 context、强制 `[n]` 标注、找不到就明说;`temperature=0.1` 降低发挥。最后路由层把 chunks 组装成带 `similarity` 和引用编号的 `sources` 数组一起返回。
+6. **生成** —— gpt-5.4(`chat.completions.create`),system 消息强约束只用 context、强制 `[n]` 标注、找不到就明说;`temperature=0.1` 降低发挥。最后路由层把 chunks 组装成带 `similarity` 和引用编号的 `sources` 数组一起返回。
 
 **对应代码**:`app/services/retrieval.py` 的 `query()` 函数。
 
@@ -34,26 +34,23 @@
 **核心**:为了能建 HNSW 索引(维度上限 2000),同时省一半存储。
 
 **展开**:
-- Gemini embedding 原生 3072 维,**超过 pgvector HNSW 索引 2000 维的上限**,建不了近似索引就只能全表暴力扫。
-- Gemini 用的是 **Matryoshka 表示学习**,向量前面的维度承载最重要的语义,所以可以直接**截断到 1536** 而语义损失很小。
+- pgvector 的 HNSW 索引维度上限是 2000,超了就建不了近似索引、只能全表暴力扫。所以目标维度要 ≤2000。
+- 现用 `text-embedding-3-small`,**原生就是 1536**,天然落在上限内、不用截断。若换 `text-embedding-3-large`(原生 3072),OpenAI `text-embedding-3` 系列是 **Matryoshka(MRL)** 模型,前面的维度承载最重要语义,可用 `dimensions=1536` **截断**而语义损失很小(早期用 Gemini 的 3072→1536 也是这招)。
 - `halfvec` 用 16 位半精度存,比 `vector`(32 位)**省一半空间和内存带宽**,对召回精度几乎无影响。
 
-**对应代码**:`app/models.py:40` `HALFVEC(settings.embedding_dim)`;`app/embedding.py:51` `output_dimensionality=1536`。
+**对应代码**:`app/models.py` `HALFVEC(settings.embedding_dim)`;`app/embedding.py` `embeddings.create(dimensions=settings.embedding_dim)`。
 
 ⚠️ **诚实提醒**:1536 维是**为了能建 HNSW 而选的**,但当前代码里 `init_db` 只建了 tsvector 的 GIN 索引,**embedding 列还没有真正建 HNSW**,所以现在向量检索其实是暴力精确 KNN(小知识库够用)。被追问"那你建索引了吗",就说:"维度是预留给 HNSW 的,目前数据量小走的精确 KNN,加索引是一行 `Index(..., postgresql_using='hnsw', ...)` 的事。"
 
 ---
 
-## 3. 为什么 embed_documents 和 embed_query 用不同的 task_type?
+## 3. Asymmetric vs Symmetric embedding(原 task_type 问题)
 
-**核心**:Gemini 是**非对称 embedding**,文档和查询分别优化到更好匹配的向量空间。
+**核心**:**非对称** embedding 给"文档"和"查询"分别优化向量空间(更易匹配,召回略升);**对称** 两边同一编码。**我现在用 OpenAI `text-embedding-3`,是对称的、无 task_type**,所以 `embed_documents` 和 `embed_query` 只差"批量 vs 单条"。
 
-**展开**:
-- 入库文档用 `RETRIEVAL_DOCUMENT`,查询用 `RETRIEVAL_QUERY`。
-- 模型内部会按用途调整向量分布,让"一个问题"和"能回答它的段落"在空间里更接近 —— 这比两边用同一种编码的检索召回率更高。
-- 这是 Gemini / 很多检索 embedding 模型的官方推荐用法。
+**展开**:非对称是不少检索模型的设计——Gemini 的 `task_type=RETRIEVAL_DOCUMENT/QUERY`、BGE 的 query/passage、E5 的 `"query:"/"passage:"` 前缀。被追问"你区分 query 和 doc 吗":现在不区分;若换 BGE-M3 等支持的模型可加角色前缀再榨点召回。
 
-**对应代码**:`app/embedding.py:101`(文档)vs `:115`(查询)。
+**对应代码**:`app/embedding.py` 的 `embed_documents` vs `embed_query`。
 
 ---
 
@@ -121,13 +118,14 @@ cross-encoder 每个 (query, doc) 对都要跑一次完整前向,**没法预先�
 PostgreSQL 默认不分中文词。我在 Docker 镜像里**自己编译了 SCWS + zhparser**,建了 `chinese_zh` 文本搜索配置,把名词/动词/形容词等词性映射成可检索词。`chunks.content_tsv` 是 `Computed` 列,DB 自动用 `to_tsvector('chinese_zh', content)` 生成,配 GIN 索引。
 **对应**:`docker/postgres/Dockerfile` + `init-extensions.sql` + `models.py:45`。
 
-### C. Free tier 限流怎么扛的?两层
-1. **主动节流**:`embed_documents` 批之间 `sleep 13s`(~5 RPM 对应 12s/请求,留余量)。
-2. **被动重试**:`tenacity` 指数退避,`wait_exponential(min=4,max=60)`,最多 6 次,只重试 API/HTTP 错误。
-**对应**:`app/embedding.py:25, 59`。
+### C. 限流怎么扛的?两层
+1. **主动节流**:`embed_documents` 批之间 `sleep`,节流值随 provider 变——Gemini free tier 要 13s(~5 RPM),现在走 OpenAI 中转站宽松,降到 0.5s。
+2. **被动重试**:`tenacity` 指数退避,`wait_exponential(min=4,max=60)`,最多 6 次,只重试 `openai.APIError` / HTTP 错误。
+**对应**:`app/embedding.py` `THROTTLE_SECONDS` + `_embed_batch_with_retry`。
+⚠️ chat 路径(`rewrite_query` / `_generate_answer`)目前**没接这层重试**,是裸调,撞 429/断连直接 502——技术债,生产要补。
 
 ### D. 为什么全程 async?
-RAG 是**重 IO**的:embedding、检索、LLM 生成全是网络/磁盘等待。async 让单进程在等待时切去处理别的请求,**并发吞吐高**。SQLAlchemy 用 async engine,Gemini 用 `client.aio`,本地 rerank 是 CPU 同步任务所以丢进 `asyncio.to_thread` 避免阻塞事件循环。
+RAG 是**重 IO**的:embedding、检索、LLM 生成全是网络/磁盘等待。async 让单进程在等待时切去处理别的请求,**并发吞吐高**。SQLAlchemy 用 async engine,LLM 用 `AsyncOpenAI`(`await client.chat.completions.create` / `client.embeddings.create`),本地 rerank 是 CPU 同步任务所以丢进 `asyncio.to_thread` 避免阻塞事件循环。
 
 ### E. 引用溯源怎么实现的?
 两端配合:**prompt 强制** LLM 在答案里写 `[n]`;**路由层**把检索到的 chunks 按相同顺序组装成 `sources` 数组,每个带 `chunk_id / document_filename / chunk_index / similarity / vector_rank / keyword_rank / rerank_score`。前端用 `[n]` 编号对回 `sources[n-1]`。
@@ -147,7 +145,8 @@ RAG 是**重 IO**的:embedding、检索、LLM 生成全是网络/磁盘等待。
 | HNSW 索引 | 未建,向量走暴力 KNN | `models.py` 给 embedding 加 HNSW Index |
 | Rerank | `ENABLE_RERANK=False` | 默认开启或做成请求参数 |
 | 两路召回 | 顺序 await(注释写"并行") | `asyncio.gather` + 各自独立 session 真并发 |
-| embedding 模型 | 硬编码 `gemini-embedding-001`/1536 | 改读 `settings.embedding_model/_dim` |
+| ~~embedding 模型硬编码~~ | ✅ 已改读 `settings.embedding_model/_dim`(迁 OpenAI 时一并做了) | — |
+| chat 无重试 | `rewrite_query`/`_generate_answer` 裸调 | 仿 embedding 接 tenacity 退避(`openai.APIError`) |
 | 评测 | 无 | 接 Ragas 做召回率/忠实度评测 |
 
 > 面试时**主动讲这些**比被问出来强:说明你 review 过自己的代码、知道生产级和当前版本的差距在哪。
