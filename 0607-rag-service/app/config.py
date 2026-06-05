@@ -15,5 +15,6 @@ class Settings(BaseSettings):
 
     # App
     log_level: str = "INFO"
+    log_json: bool = False       # True=输出 JSON(生产);False=彩色控制台(本地开发)
 
 settings = Settings() # type: ignore[call-arg]

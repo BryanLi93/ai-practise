@@ -13,3 +13,4 @@ tenacity
 langchain-text-splitters
 pymupdf
 sentence-transformers
+structlog

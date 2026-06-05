@@ -136,6 +136,22 @@ RAG 是**重 IO**的:embedding、检索、LLM 生成全是网络/磁盘等待。
 - 上传做白名单校验 + 大小限制(30MB)。
 - 已知业务异常(空内容)→ 4xx,未知异常 → 5xx + 记完整日志。
 
+### G. 日志和可观测性怎么做的?trace_id 怎么贯穿一次请求?
+
+**核心**:结构化 JSON 日志(structlog)+ 每个请求一个 trace_id 串起全链路日志;trace_id 靠 `contextvars`(异步版的 thread-local)隐式贯穿调用链,并发请求互不串号。
+
+**展开**:
+- **结构化**:日志不拼字符串,而是"事件名 + 字段"(`log.info("retrieval_done", candidates=20)`),经 structlog 的 processor 管道渲染 —— 本地彩色、生产 JSON(`LOG_JSON` 切换),JSON 能被 `jq` / 日志系统按字段查询。
+- **统一管道**:structlog 的 `ProcessorFormatter` 把标准库 logging 也接管过来,sqlalchemy / openai 等第三方库日志走同一格式。(uvicorn 自带 logging 且与 `--reload` 多进程有时序冲突,单独留它原生格式,用中间件自打的请求日志替代它的 access log。)
+- **trace_id 机制(重点)**:中间件入口 `bind_contextvars(trace_id=...)` 发号,本次请求里所有日志的 `merge_contextvars` 自动取到它,结束 `clear_contextvars()` 收号。**为什么并发不串号**:`ContextVar` 的值存在"每个 asyncio Task 自己的 Context"里,不是全局变量;`await` 切协程时事件循环连 Context 一起切,所以 A 读到 A 的、B 读到 B 的。用全局变量则会被后到的请求覆盖(串号)。
+- **请求级 timing + 透传**:中间件每请求打一条 `request_completed`(method/path/status/elapsed_ms/trace_id),响应头回传 `X-Trace-Id`;客户端报错时给你这个 id,一条 `jq 'select(.trace_id==...)'` 就捞出整次请求。上游已带 `X-Trace-Id` 则沿用(跨服务串联),否则自己生成。
+
+**延伸(被深问时)**:这是单服务版;分布式追踪扩成 trace_id + span_id,用 W3C `traceparent` 头跨服务透传,行业标准实现是 OpenTelemetry —— 我们的中间件是它的极简版。
+
+**对应代码**:`app/logging_config.py`(structlog 管道 + 桥接 stdlib);`app/main.py` 的 `trace_context_middleware`。
+
+⚠️ **诚实提醒**:只做了**请求级**耗时;原计划的 service 内**分段 timing**(rewrite / retrieve / generate 各段)和**细粒度异常状态码映射**(401/403/429/503 等)没做(query.py 现有 404/502 翻译够用)。被追问"能定位慢在哪一段吗",答:"目前到请求级,分段打点是下一步 —— 在 chat.py / retrieval.py 关键调用前后加 `log.info` + 计时即可。"
+
 ---
 
 ## 当前状态待办(改进项,主动说反而加分)

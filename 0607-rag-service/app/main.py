@@ -3,10 +3,12 @@ RAG Service 主入口。
 """
 from __future__ import annotations
 
-import logging
+import time
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import structlog
 from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -16,23 +18,21 @@ from fastapi.staticfiles import StaticFiles
 from app.routers import upload, query, conversation
 from app.config import settings
 from app.db import engine
+from app.logging_config import configure_logging
 
 
 # ---------- 日志 ----------
-
-logging.basicConfig(
-    level=settings.log_level,
-    format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
-)
-logger = logging.getLogger(__name__)
+# 必须在任何 logger 使用前先配好管道
+configure_logging()
+logger = structlog.get_logger()
 
 # ---------- 生命周期 ----------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用启动/关闭时的钩子。"""
-    logger.info("RAG service starting up")
+    logger.info("startup")
     yield
-    logger.info("RAG service shutting down")
+    logger.info("shutdown")
     await engine.dispose()
 
 # ---------- 应用实例 ----------
@@ -52,15 +52,40 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ---------- 中间件:trace_id + 请求耗时 ----------
+@app.middleware("http")
+async def trace_context_middleware(request: Request, call_next):
+    """给每个请求绑定 trace_id,使本次请求的所有日志自动带上它;
+    请求结束打一条 access 日志(method/path/status/耗时),并通过响应头回传 trace_id。"""
+    trace_id = request.headers.get("X-Trace-Id") or uuid.uuid4().hex[:12]
+    structlog.contextvars.bind_contextvars(trace_id=trace_id)
+    start = time.perf_counter()
+    try:
+        response = await call_next(request)
+        elapsed_ms = round((time.perf_counter() - start) * 1000, 1)
+        logger.info(
+            "request_completed",
+            method=request.method,
+            path=request.url.path,
+            status=response.status_code,
+            elapsed_ms=elapsed_ms,
+        )
+        response.headers["X-Trace-Id"] = trace_id
+        return response
+    finally:
+        # 请求结束清掉,避免 trace_id 残留到下一个复用的协程上下文
+        structlog.contextvars.clear_contextvars()
+
 # ---------- 全局异常处理 ----------
 
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception):
     """兜底未捕获异常,避免 stacktrace 泄露给客户端。"""
-    logger.exception("unhandled exception on %s %s", request.method, request.url)
+    trace_id = structlog.contextvars.get_contextvars().get("trace_id")
+    logger.exception("unhandled_exception", method=request.method, url=str(request.url))
     return JSONResponse(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        content={"detail": f"Internal server error: {type(exc).__name__}"},
+        content={"detail": f"Internal server error: {type(exc).__name__}", "trace_id": trace_id},
     )
 
 # ---------- 路由 ----------
