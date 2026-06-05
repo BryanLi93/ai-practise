@@ -1,5 +1,6 @@
 import uuid
 import logging
+from collections.abc import AsyncIterator
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -9,6 +10,7 @@ from app.config import settings
 from app.services.retrieval import query as run_query
 from app.services import conversation as conv_service
 from app.schemas import Source, QueryResponse
+from app.services.retrieval import retrieve, generate_stream, NO_CONTEXT_ANSWER
 
 logger = logging.getLogger(__name__)
 
@@ -55,18 +57,15 @@ async def rewrite_query(question: str, recent_messages: list[Message]) -> str:
 
     return content.strip()
 
-async def handle_chat(
+
+# ---------- 两条链路共用的编排零件 ----------
+async def _prepare(
     db: AsyncSession,
     req_conversation_id: uuid.UUID | None,
     req_question: str,
-    req_top_k: int,
-) -> QueryResponse:
-    """
-    多轮对话编排:解析会话 → 改写 → 检索生成 →(成功后)落库。
+) -> tuple[list[Message], str]:
+    # 会话+历史+改写
 
-    - 所有 DB 写操作都放在 RAG 成功之后,中途失败一个字都不写,不留空会话。
-    - 不在这里管 HTTP 状态码:会话不存在抛 ConversationNotFound,由 router 翻译成 404。
-    """
     # 1. 解析会话 + 加载历史(只读,不写库)
     recent_messages: list[Message] = []
     if req_conversation_id is not None:
@@ -79,18 +78,11 @@ async def handle_chat(
     if recent_messages:
         search_query = await rewrite_query(req_question, recent_messages)
         logger.info("rewrite: %r -> %r", req_question, search_query)
+    return recent_messages, search_query
 
-    # 3. 检索 + 生成(无 DB 写入)
-    result = await run_query(
-        db,
-        question=req_question,
-        search_query=search_query,
-        recent_messages=recent_messages,
-        top_k=req_top_k,
-    )
-
+def _build_sources(retrieved: list) -> list[Source]:
     # 4. 组装 sources(落库的 sources_json 和响应共用同一份)
-    sources = [
+    return [
         Source(
             id=i,
             chunk_id=rc.chunk.id,
@@ -103,10 +95,17 @@ async def handle_chat(
             keyword_rank=rc.keyword_rank,
             rerank_score=rc.rerank_score,
         )
-        for i, rc in enumerate(result.sources, start=1)
+        for i, rc in enumerate(retrieved, start=1)
     ]
 
-    # 5. RAG 成功后才写库:会话 + 两条消息,放进一个事务一次提交
+async def _persist(
+    db: AsyncSession,
+    req_conversation_id: uuid.UUID | None,
+    req_question: str,
+    answer: str,
+    sources_payload: list[dict],
+) -> uuid.UUID:
+   # 5. RAG 成功后才写库:会话 + 两条消息,放进一个事务一次提交
     if req_conversation_id is None:
         conv = await conv_service.create_conversation(db, title=req_question[:50], commit=False)
         conversation_id = conv.id
@@ -119,11 +118,66 @@ async def handle_chat(
     )
     await conv_service.add_message(
         db, conversation_id=conversation_id, role="assistant",
-        content=result.answer, sources=[s.model_dump() for s in sources],
+        content=answer, sources=sources_payload,
         commit=False,
     )
     await db.commit()
+    return conversation_id
+
+# ---------- 两条对外链路:只差"怎么生成" ----------
+async def handle_chat(
+    db: AsyncSession,
+    req_conversation_id: uuid.UUID | None,
+    req_question: str,
+    req_top_k: int,
+) -> QueryResponse:
+    """
+    多轮对话编排:解析会话 → 改写 → 检索生成 →(成功后)落库。
+
+    - 所有 DB 写操作都放在 RAG 成功之后,中途失败一个字都不写,不留空会话。
+    - 不在这里管 HTTP 状态码:会话不存在抛 ConversationNotFound,由 router 翻译成 404。
+    """
+    recent_messages, search_query = await _prepare(db, req_conversation_id, req_question)
+
+    # 3. 检索 + 生成(无 DB 写入)
+    result = await run_query(
+        db,
+        question=req_question,
+        search_query=search_query,
+        recent_messages=recent_messages,
+        top_k=req_top_k,
+    )
+    
+    sources = _build_sources(result.sources)
+    sources_payload = [s.model_dump() for s in sources]
+    conversation_id = await _persist(db, req_conversation_id, req_question, result.answer, sources_payload)
 
     # 6. 返回
     return QueryResponse(answer=result.answer, sources=sources, conversation_id=conversation_id)
 
+async def handle_chat_stream(
+    db: AsyncSession,
+    req_conversation_id: uuid.UUID | None,
+    req_question: str,
+    req_top_k: int,
+) -> AsyncIterator[dict]:
+    # """流式:sources 整包先发,answer 逐 token 发,done 收尾。写库时机同 handle_chat。"""
+    recent_messages, search_query = await _prepare(db, req_conversation_id, req_question)
+    retrieved = await retrieve(db, search_query=search_query, top_k=req_top_k)
+
+    sources = _build_sources(retrieved)
+    sources_payload = [s.model_dump() for s in sources]
+    yield {"type": "sources", "sources": sources_payload}
+
+    if retrieved:
+        parts: list[str] = []
+        async for token in generate_stream(req_question, retrieved, recent_messages):
+            parts.append(token)
+            yield {"type": "token", "text": token}
+        answer = "".join(parts)
+    else:
+        answer = NO_CONTEXT_ANSWER
+        yield {"type": "token", "text": answer}
+    
+    conversation_id = await _persist(db, req_conversation_id, req_question, answer, sources_payload)
+    yield {"type": "done", "conversation_id": str(conversation_id)}

@@ -7,6 +7,7 @@ import logging
 from dataclasses import dataclass
 import asyncio
 import re
+from collections.abc import AsyncGenerator
 
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, text as sql_text
@@ -289,23 +290,24 @@ def _format_context(retrieved: list[RetrievedChunk]) -> str:
     return "\n\n".join(parts)
 
 # ---------- 内部:生成 ----------
-async def _generate_answer(question: str, context: str, recent_messages: list[Message]) -> str:
-    client = get_openai_client()
-
+def _build_user_prompt(question: str, context: str, recent_messages: list[Message]) -> str:
     user_prompt = USER_PROMPT_TEMPLATE.format(context=context, question=question)
-
     # 历史记录
     if recent_messages:
         history = "\n".join([f"{m.role}:{m.content}" for m in recent_messages])
         history = re.sub(r"\[\d+\]", "", history) # 清除历史记录中的引用符号，避免影响提示词
         history_prompt = HISTORY_PROMPT_TEMPLATE.format(history=history)
         user_prompt = history_prompt + user_prompt
+    return user_prompt
+
+async def _generate_answer(question: str, context: str, recent_messages: list[Message]) -> str:
+    client = get_openai_client()
 
     response = await client.chat.completions.create(
         model=settings.chat_model,
         messages=[
             {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_prompt},
+            {"role": "user", "content": _build_user_prompt(question, context, recent_messages)},
         ],
         temperature=0.1,
         max_tokens=1024,
@@ -317,7 +319,69 @@ async def _generate_answer(question: str, context: str, recent_messages: list[Me
 
     return content.strip()
 
+async def _generate_answer_stream(question: str, context: str, recent_messages: list[Message]) -> AsyncGenerator[str]:
+    """流式版 _generate_answer:逐个 yield token 文本,不等整段生成完。"""
+
+    client = get_openai_client()
+
+    stream = await client.chat.completions.create(
+        model=settings.chat_model,
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": _build_user_prompt(question, context, recent_messages)},
+        ],
+        temperature=0.1,
+        max_tokens=1024,
+        stream=True
+    )
+
+    async for chunk in stream:
+        # 尾帧/usage 帧可能 choices 为空,跳过
+        if not chunk.choices:
+            continue
+
+        delta = chunk.choices[0].delta.content
+        if delta:
+            yield delta
+
 # ---------- 对外 API ----------
+async def retrieve(
+    db: AsyncSession,
+    *,
+    search_query: str, # 改写的 question
+    top_k: int = DEFAULT_TOP_K
+) -> list[RetrievedChunk]:
+    """只检索不生成。流式链路用它拿 sources;query() 也复用它。"""
+    # 1. 把 question embed 成向量
+    query_vector = await embed_query(search_query)
+
+    # 2. 检索 top-k chunks
+    # retrieved = await _retrieve_chunks(db, query_vector=query_vector, top_k=top_k)
+    # 召回(混合检索)
+    candidates = await _hybrid_retrieve(
+        db, question=search_query, query_vector=query_vector,
+        candidates=RERANK_CANDIDATES
+    )
+
+    if not candidates:
+        return []
+    
+    # Rerank
+    if ENABLE_RERANK:
+        return await _rerank_chunks(search_query, candidates, top_k)
+    else:
+        return candidates[:top_k]
+
+async def generate_stream(
+    question: str,
+    retrieved: list[RetrievedChunk],
+    recent_messages: list[Message],
+):
+    """对已检索到的 chunks 流式生成答案,逐 token yield。"""
+    context = _format_context(retrieved)
+    async for token in _generate_answer_stream(question, context, recent_messages):
+        yield token
+
 async def query(
     db: AsyncSession,
     *,
@@ -339,25 +403,9 @@ async def query(
     """
     logger.info("query: %s / search_query: %s (top_k=%d)", question, search_query, top_k)
 
-    # 1. 把 question embed 成向量
-    query_vector = await embed_query(search_query)
-
-    # 2. 检索 top-k chunks
-    # retrieved = await _retrieve_chunks(db, query_vector=query_vector, top_k=top_k)
-    # 召回(混合检索)
-    candidates = await _hybrid_retrieve(
-        db, question=search_query, query_vector=query_vector,
-        candidates=RERANK_CANDIDATES
-    )
-
-    if not candidates:
+    retrieved = await retrieve(db, search_query=search_query, top_k=top_k)
+    if not retrieved:
         return QueryResult(answer=NO_CONTEXT_ANSWER, sources=[])
-    
-    # Rerank
-    if ENABLE_RERANK:
-        retrieved = await _rerank_chunks(search_query, candidates, top_k)
-    else:
-        retrieved = candidates[:top_k]
     
     for i, rc in enumerate(retrieved, start=1):
         logger.debug(
@@ -367,7 +415,6 @@ async def query(
             rc.vector_rank, rc.keyword_rank,
             rc.document.filename, rc.chunk.chunk_index,
         )
-
 
     # 3. 组装 context(把多个 chunk 用分隔符拼接)
     content = _format_context(retrieved)

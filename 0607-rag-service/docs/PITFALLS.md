@@ -94,3 +94,66 @@
 
 - **细节**:`id = mapped_column(Uuid, default=uuid.uuid4)` 是 **python 端默认值**,`flush` 时就生成,不需要 commit;而 `created_at = mapped_column(..., server_default=func.now())` 是**数据库端默认值**,要 commit/refresh 之后才有值。本次只需要 id,所以 `flush` 足够。
 - **复习点**:`default`(python 端)vs `server_default`(DB 端),拿到值的时机不同。需要自增 int 主键时同理——靠 flush 拿。
+
+---
+
+## Week 7 Day 4 — 流式输出(SSE)
+
+### P10. 异步生成器调用不执行函数体,错误"何时冒出"由谁先拉决定
+
+- **现象**:`/query/stream` 传一个不存在的 `conversation_id`,本想返回 404,实际客户端收到的是 HTTP 200 然后连接异常断开。
+- **原因**:函数体里有 `yield` 的函数(异步生成器),`handle_chat_stream(...)` 这一行**一行函数体都不跑**,只返回一个待命对象;里面的 `raise ConversationNotFound` 要等有人来"拉"(`__anext__` / `async for`)才执行。直接 `return StreamingResponse(agen)` 时是 FastAPI 来拉,而它**先发 200 再拉** → raise 发生在 200 之后,状态码改不回来。
+- **正解**:router 里**先手动拉第一帧**,把错误逼到开流之前:
+  ```python
+  agen = handle_chat_stream(...)
+  try:
+      first_frame = await agen.__anext__()   # 此刻才真正跑会话校验/检索,200 还没发
+  except ConversationNotFound:
+      raise HTTPException(404, ...)           # 还来得及
+  # event_stream 里先补发 first_frame,再 async for 拉剩下的
+  ```
+- **复习点**:生成器是惰性的——"代码写在哪"≠"代码何时跑"。流式接口的错误分两段:开流前(能映射 HTTP 状态码)、开流后(只能塞 error 数据帧)。第一帧选在检索之后产出,正好把会话校验和检索的错误都圈进"开流前"。
+
+### P11. 流式 chunk 的 token 在 `delta.content`,且首尾/usage 帧会是空
+
+- **现象**:照搬非流式的 `response.choices[0].message.content` 读不到流式 token;或对某些 chunk 直接 `TypeError`。
+- **原因**:`stream=True` 时每个 chunk 的增量在 `choices[0].delta.content`(不是 `message.content`)。而首帧(只带 role)、尾帧、部分中转站的 usage 统计帧,`content` 是 `None` 或 `choices` 为空数组。
+- **正解**:
+  ```python
+  async for chunk in stream:
+      if not chunk.choices:           # 空 choices 帧跳过
+          continue
+      delta = chunk.choices[0].delta.content
+      if delta:                       # None 跳过
+          yield delta
+  ```
+- **复习点**:流式响应结构和非流式不同(`delta` vs `message`),且边界帧不携带文本,取值前先 guard。
+
+### P12. SSE 网络分块和消息边界不对齐,中文还会被字节切断
+
+- **现象**:前端 `JSON.parse` 偶发报错;或中文出现乱码。
+- **原因**:两件事。(1) `fetch` 的 `ReadableStream` 按网络节奏给字节块,一块里可能是半条 SSE 消息、也可能是好几条,和 `\n\n` 边界不对齐。(2) 一个中文 3 字节,块可能在字中间切开。
+- **正解**:
+  ```js
+  buffer += decoder.decode(value, { stream: true }); // stream:true:半个字的字节留到下次
+  let sep;
+  while ((sep = buffer.indexOf("\n\n")) !== -1) {     // 攒够一条完整消息才解析
+    const raw = buffer.slice(0, sep);
+    buffer = buffer.slice(sep + 2);
+    if (raw.startsWith("data: ")) handle(JSON.parse(raw.slice(6)));
+  }
+  ```
+- **复习点**:读流必须自己缓冲 + 按分隔符切帧,不能"拿到一块就当一条";`TextDecoder` 处理多字节字符要开 `stream: true`。
+
+### P13. 重构抽函数后,变量名没对齐(`answer` vs `result.answer`)
+
+- **现象**:`handle_chat`(非流式)运行时 `NameError: name 'answer' is not defined`。
+- **原因**:从流式版复制 `_persist(..., answer, ...)` 过来,但非流式路径里答案在 `result.answer`,没有裸 `answer` 变量。
+- **复习点**:同 P2/P7——抽/搬代码后,逐个核对变量来源在当前作用域是否真的存在,尤其在流式/非流式两条相似链路之间复制粘贴时。
+
+### P14. 跑服务命中错 Python:依赖在项目 `.venv`,不在 pyenv 全局
+
+- **现象**:`uvicorn app.main:app` 报 `ModuleNotFoundError: No module named 'sqlalchemy'`;换 `~/.pyenv/versions/3.12.13/bin/python` 又报 `No module named 'psycopg'`。
+- **原因**:裸 `uvicorn` / `fastapi` 命令在 PATH 里先命中**系统 Python 3.9**;pyenv 全局 3.12.13 也没装项目依赖。真正装齐依赖的是**项目内 `.venv`**。
+- **正解**:非交互式一律显式用 `.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000`。平时终端 `fastapi dev` 能跑是因为已激活 `.venv`。
+- **复习点**:`python -m py_compile` 只编译不导入,过了≠能跑;验证"能起服务"要用项目自己的解释器。

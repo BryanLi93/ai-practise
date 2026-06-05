@@ -1,7 +1,7 @@
 # RAG Service — 项目上下文（交接自 PROJECT_CONTEXT.md）
 
 > 本文件由长期对话的交接文档迁移而来,Claude Code 启动时自动读取为项目上下文。
-> **状态已于 2026-06-04 核对**:Week 7 Day 3 已完成(纯 HTML + vanilla JS 前端,挂在 `/ui`),准备进 Day 4(流式输出)。
+> **状态已于 2026-06-05 核对**:Week 7 Day 4 已完成(SSE 流式输出,前后端打通,curl + `/ui` 已验证),准备进 Day 5(结构化日志)。
 > 注意:git 仓库根在**上一级** `~/Documents/my-code/ai-practise`,本项目是其子目录;`.gitignore` 在上级。
 
 ---
@@ -60,6 +60,7 @@
 | 容器 | Docker Compose + OrbStack | |
 
 **环境备忘**
+- ⚠️ **依赖装在项目内 `.venv`,不是 pyenv 全局 3.12.13**:脚本化/非交互式跑服务必须显式用 `.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000`。直接敲 `uvicorn`/`fastapi` 会命中系统 Python 3.9(报 `ModuleNotFoundError: sqlalchemy`);`~/.pyenv/versions/3.12.13/bin/python` 全局也没装 psycopg(报 `No module named 'psycopg'`)。平时 `fastapi dev` 能跑,是因为终端已激活 `.venv`。注意 `python -m py_compile` 不导入依赖,过了≠能起服务。
 - pip 用清华镜像:`pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple`
 - HuggingFace 模型下载用国内镜像:`.env` 里设 `HF_ENDPOINT=https://hf-mirror.com`
 - 两个 Postgres 实例:`ai_registry` 项目在 5432,本 RAG 项目在 5433
@@ -179,6 +180,13 @@
   - `app/main.py` 用 `StaticFiles(html=True)` 把 `web/` 挂到 `/ui`(与 API 同源,无 CORS);访问 `http://127.0.0.1:8000/ui/`
   - "新对话"只清前端状态,服务端在首次 `/query` 才建会话(复用 Day 2 单事务,不留空会话)
 - **Provider 迁移(Day 4 前插入)— 已完成**:Gemini 原生 SDK 老断连,chat + embedding 全面切到 **OpenAI 兼容中转站**(`app/llm.py` 的 `get_openai_client()` 单例;chat=`gpt-5.4`,embedding=`text-embedding-3-small`,均 .env 配)。换 embedding 模型已清库重灌。
+- **Day 4(流式输出)— 已完成**:
+  - `services/retrieval.py`:`query()` 拆成 `retrieve()`(只检索)+ `generate_stream()`(只流式生成);`_generate_answer_stream` 用 `chat.completions.create(stream=True)` 逐 token `yield`(guard `choices` 空帧 / `delta.content` 为 None);`_build_user_prompt` 抽出供流式/非流式共用。
+  - `services/chat.py`:抽 `_prepare`(会话+历史+改写)/ `_build_sources` / `_persist`(单事务写库)三个共用件;`handle_chat`(非流式,保留 `run_query`)与 `handle_chat_stream`(流式,产出语义帧 dict)各走各的生成,**未强行合并**(讨论后定:非流式不绕道流式)。
+  - `routers/query.py`:新增 `POST /query/stream`,`_sse()` 把帧编码成 `data: {json}\n\n`;**先手动 `await agen.__anext__()` 取第一帧**,把"开流前错误"(会话不存在→404 / 检索失败→502)与"开流后错误"(生成中途→error 帧)分开——开流后 HTTP 200 已发,状态码改不了。
+  - `web/index.html`:`streamQuery()` 用 `fetch` + `ReadableStream` 读流(POST 带 body 不能用 EventSource),`TextDecoder({stream:true})` + 按 `\n\n` 缓冲切帧;`sendMessage` 改成 sources 先渲染、token 累积重渲染 markdown。
+  - 帧协议:`sources`(1)→ `token`(N)→ `done`(带 conversation_id)。语义帧(dict)与 SSE 编码**分层**:chat 层产 dict,router 层编码字节。
+  - 验证:`curl -N /query/stream` 见三段逐步到达;库里 user+assistant 两条消息确认写入(流式单事务闭环成立)。易错点见 `docs/PITFALLS.md`(P10–P14)。
 
 ---
 
@@ -188,8 +196,8 @@
 |---|---|---|
 | ~~Day 2~~(已完成) | Query Rewriting + 历史注入 | ✅ 已实现:`get_recent_messages` → `rewrite_query` → 解耦 search_query/question → 历史进生成 prompt → `handle_chat` 编排 + 单事务。详见第 5 节与 `docs/PITFALLS.md` |
 | ~~Day 3~~(已完成) | 简单前端 | ✅ `web/index.html` 三栏(上传/对话/引用),内置 Markdown 渲染,挂在 `/ui`。详见第 5 节 |
-| **Day 4(下一步)** | 流式输出 | SSE + FastAPI StreamingResponse + OpenAI `chat.completions.create(stream=True)` + 前端 fetch ReadableStream(非 EventSource,因 /query 是 POST 带 body)。建议单独做,涉及前后端两层 |
-| Day 5 | 结构化日志 | JSON 日志 + trace_id 中间件 + 异常分层(401/403/404/422/429/500/502/503)+ 关键路径 timing |
+| ~~Day 4~~(已完成) | 流式输出 | ✅ SSE + `StreamingResponse` + `chat.completions.create(stream=True)` + 前端 `fetch` ReadableStream。拆 `retrieve`/`generate_stream`,先拉一帧分段错误处理。详见第 5 节与 `docs/PITFALLS.md`(P10–P14) |
+| **Day 5(下一步)** | 结构化日志 | JSON 日志 + trace_id 中间件 + 异常分层(401/403/404/422/429/500/502/503)+ 关键路径 timing |
 | Day 6 | 基础监控 | /metrics 端点:QPS/延迟/错误率、token 用量、召回数分布、rerank score 分布。可选接 prometheus_client |
 | Day 7 | Docker 整合 | FastAPI 也容器化,compose 编排两服务,HF 模型缓存 volume 持久化,一键 `docker compose up` |
 
@@ -206,7 +214,8 @@
 - **中转站限流/稳定性**:限流取决于服务商;chat 长生成仍可能断连,大文档入库受其约束;长对话多一次 query rewrite 调用,更吃用量
 - **`similarity` 字段语义模糊**:经 RRF 后是 `min(1.0, rrf_score*30)`,既非 cosine 也非纯 RRF;生产建议改用 rank
 - ~~**RAG 失败留空会话**~~:**已于 Day 2 修复**——写库全部移到 RAG 成功之后,`handle_chat` 单事务一次 commit,失败回滚不留空会话
-- **chat 调用无重试**:`rewrite_query` / `_generate_answer` 的 `chat.completions.create` 是裸调,不像 `embedding.py` 有 tenacity 退避;中转站撞 429/断连直接 502。生产需补(可复用 embedding 的退避思路,异常类型用 `openai.APIError`)
+- **chat 调用无重试**:`rewrite_query` / `_generate_answer` / `_generate_answer_stream` 的 `chat.completions.create` 都是裸调,不像 `embedding.py` 有 tenacity 退避;中转站撞 429/断连直接 502(流式则在开流后变成 error 帧)。生产需补(可复用 embedding 的退避思路,异常类型用 `openai.APIError`)
+- **`ENABLE_RERANK` 当前为 `False`**:`retrieval.py` 的 A/B 开关现在关着,rerank 未生效,召回排序质量打折(流式不受影响)。要测召回质量记得改回 `True`
 - **标题孤儿问题**:Markdown 标题可能被单独切成一个无信息 chunk(如 `## 检索流程`);未处理,Week 13-14 评测暴露后再优化(可选 MarkdownHeaderTextSplitter)
 - **chunk 策略是"凑合能用"**:chunk_size=500/overlap=50 是起步值,未调优;overlap 仅在"切碎超长段落"时生效,纯段落合并不加 overlap
 - **小知识库混合检索优势不明显**:当前测试集 embedding 已很强,混合检索主要起"补强"而非"救场"作用;但多语言/长尾场景仍需要
@@ -231,8 +240,15 @@ docker compose up -d --build
 # 建表(只创建不存在的表,不动现有数据)
 python -m scripts.init_db
 
-# 启动服务
+# 启动服务(交互式开发,终端已激活 .venv)
 fastapi dev app/main.py           # 或 uvicorn app.main:app --reload
+# 脚本化/非交互式:必须显式用 .venv 解释器(裸 uvicorn 会命中系统 py3.9)
+.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+
+# 测流式端点(-N 关 curl 缓冲;逐字到达 = 成功)
+curl -N -X POST http://127.0.0.1:8000/query/stream \
+  -H "Content-Type: application/json" \
+  -d '{"question":"什么是 RAG?","top_k":5}'
 
 # 手动验证脚本(无 pytest,直接跑)
 python -m scripts.test_embedding

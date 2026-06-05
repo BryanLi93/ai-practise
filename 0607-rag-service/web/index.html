@@ -291,6 +291,39 @@
     catch { return "HTTP " + r.status; }
   }
 
+  // 读 /query/stream 的 SSE 流,按帧类型回调。开流前的错误(404/502)直接抛。
+  async function streamQuery(body, { onSources, onToken, onDone }) {
+    const r = await fetch("/query/stream", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) throw new Error(await errDetail(r));   // 开流前:能拿到正常的 404/502 JSON
+
+    const reader = r.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });   // 字节→字符,半个字留到下次
+
+      // 反复切出以 \n\n 结尾的完整 SSE 消息(网络分块和消息边界不对齐)
+      let sep;
+      while ((sep = buffer.indexOf("\n\n")) !== -1) {
+        const raw = buffer.slice(0, sep);
+        buffer = buffer.slice(sep + 2);
+        if (!raw.startsWith("data: ")) continue;
+        const frame = JSON.parse(raw.slice(6));            // 去掉 "data: " 前缀
+        if (frame.type === "sources") onSources(frame.sources);
+        else if (frame.type === "token") onToken(frame.text);
+        else if (frame.type === "done") onDone(frame.conversation_id);
+        else if (frame.type === "error") throw new Error(frame.message);  // 开流后的错误
+      }
+    }
+  }
+
   function escapeHtml(s) {
     return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   }
@@ -508,7 +541,7 @@
 
   $("#newConvBtn").addEventListener("click", startNewConversation);
 
-  // ============ 发送提问 ============
+  // ============ 发送提问(流式) ============
   async function sendMessage() {
     const question = questionInput.value.trim();
     if (!question) return;
@@ -520,27 +553,38 @@
     autoGrow();
     appendUserMessage(question);
     setSending(true);
-    const typing = appendTyping();
+    const bubble = appendTyping();          // 先显示"思考中"三个点
+
+    const isNew = currentConversationId === null;
+    let answerText = "";
+    let sources = [];
 
     try {
-      const res = await postJSON("/query", {
-        question,
-        conversation_id: currentConversationId,  // null → 服务端建新会话
-      });
-      const isNew = currentConversationId === null;
-      currentConversationId = res.conversation_id;
+      await streamQuery(
+        { question, conversation_id: currentConversationId },  // null → 服务端建新会话
+        {
+          onSources(s) {
+            sources = s;
+            renderSources(sources);          // sources 帧最先到,右栏先亮
+          },
+          onToken(t) {
+            answerText += t;
+            bubble.innerHTML = renderMarkdown(answerText);  // 每个 token 重渲染整段
+            scrollToBottom();
+          },
+          onDone(convId) {
+            currentConversationId = convId;  // 首轮在这里才拿到会话 id
+          },
+        }
+      );
 
-      // 用真正答案替换"思考中"占位
-      typing.innerHTML = renderMarkdown(res.answer);
-      const idx = messageSources.push(res.sources) - 1;
-      typing.dataset.msgIndex = String(idx);
-      setActiveBubble(typing);
-      renderSources(res.sources);
-      scrollToBottom();
-
+      // 流正常结束:把 sources 绑到这条气泡,供点击 [n] 联动
+      const idx = messageSources.push(sources) - 1;
+      bubble.dataset.msgIndex = String(idx);
+      setActiveBubble(bubble);
       if (isNew) loadConversations();   // 新会话:刷新左侧列表(标题已生成)
     } catch (err) {
-      typing.innerHTML = `<span style="color:var(--danger)">出错了:${escapeHtml(err.message)}</span>`;
+      bubble.innerHTML = `<span style="color:var(--danger)">出错了:${escapeHtml(err.message)}</span>`;
       toast("提问失败:" + err.message, true);
     } finally {
       setSending(false);
