@@ -18,6 +18,7 @@ from app.llm import get_openai_client
 from app.models import Chunk, Document, Message
 from app.config import settings
 from app.rerank import rerank as do_rerank
+from app import metrics
 
 logger = logging.getLogger(__name__)
 
@@ -278,6 +279,7 @@ async def _rerank_chunks(
     # 用 rerank 分数排序
     for rc, score in zip(candidates, scores):
         rc.rerank_score = score
+        metrics.RERANK_SCORE.observe(float(score))
 
     reranked = sorted(candidates, key = lambda rc: rc.rerank_score or 0.0, reverse=True)
     return reranked[:top_k]
@@ -300,6 +302,14 @@ def _build_user_prompt(question: str, context: str, recent_messages: list[Messag
         user_prompt = history_prompt + user_prompt
     return user_prompt
 
+def _record_token_usage(usage) -> None:
+    """把一次 chat 调用的 token 用量累加进指标(usage 可能为 None)。"""
+    if not usage:
+        return
+    metrics.LLM_TOKENS.labels(settings.chat_model, "prompt").inc(usage.prompt_tokens)
+    metrics.LLM_TOKENS.labels(settings.chat_model, "completion").inc(usage.completion_tokens)
+
+
 async def _generate_answer(question: str, context: str, recent_messages: list[Message]) -> str:
     client = get_openai_client()
 
@@ -312,6 +322,7 @@ async def _generate_answer(question: str, context: str, recent_messages: list[Me
         temperature=0.1,
         max_tokens=1024,
     )
+    _record_token_usage(response.usage)
 
     content = response.choices[0].message.content
     if not content:
@@ -332,12 +343,14 @@ async def _generate_answer_stream(question: str, context: str, recent_messages: 
         ],
         temperature=0.1,
         max_tokens=1024,
-        stream=True
+        stream=True,
+        stream_options={"include_usage": True},  # 让最后一帧带 token 用量
     )
 
     async for chunk in stream:
-        # 尾帧/usage 帧可能 choices 为空,跳过
+        # 尾帧/usage 帧 choices 为空:这里顺便把 token 用量记进指标
         if not chunk.choices:
+            _record_token_usage(chunk.usage)
             continue
 
         delta = chunk.choices[0].delta.content
@@ -362,6 +375,7 @@ async def retrieve(
         db, question=search_query, query_vector=query_vector,
         candidates=RERANK_CANDIDATES
     )
+    metrics.RETRIEVAL_CANDIDATES.observe(len(candidates))
 
     if not candidates:
         return []

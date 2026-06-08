@@ -14,3 +14,4 @@ langchain-text-splitters
 pymupdf
 sentence-transformers
 structlog
+prometheus-client

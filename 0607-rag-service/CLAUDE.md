@@ -1,7 +1,7 @@
 # RAG Service — 项目上下文（交接自 PROJECT_CONTEXT.md）
 
 > 本文件由长期对话的交接文档迁移而来,Claude Code 启动时自动读取为项目上下文。
-> **状态已于 2026-06-05 核对**:Week 7 Day 5 已完成(结构化日志:structlog JSON 管道 + 桥接 stdlib + trace_id 中间件 + 请求级 timing,最小实现),准备进 Day 6(基础监控)。
+> **状态已于 2026-06-05 核对**:Week 7 Day 6 已完成(基础监控:prometheus_client 5 指标 + /metrics 端点,最小实现),准备进 Day 7(Docker 整合)。
 > 注意:git 仓库根在**上一级** `~/Documents/my-code/ai-practise`,本项目是其子目录;`.gitignore` 在上级。
 
 ---
@@ -55,6 +55,7 @@
 | Rerank | `BAAI/bge-reranker-v2-m3` | 经 `sentence-transformers` 加载,本地推理 |
 | 限流重试 | `tenacity` | 指数退避 |
 | 日志 | `structlog` | 结构化 JSON 管道 + 桥接 stdlib;contextvars 注入 trace_id |
+| 监控 | `prometheus-client` | Counter/Histogram + `/metrics` 端点(pull 模型) |
 | 分块 | `langchain-text-splitters` | RecursiveCharacterTextSplitter |
 | token 估算 | `tiktoken` | cl100k_base(对 gpt-5.4 是近似值) |
 | PDF 解析 | `pymupdf`(fitz) | |
@@ -194,6 +195,12 @@
   - `main.py` 加 `trace_context_middleware`:入口 `bind_contextvars(trace_id=上游 X-Trace-Id or uuid4().hex[:12])`,出口打 `request_completed`(method/path/status/elapsed_ms)+ 响应头 `X-Trace-Id`,`finally` `clear_contextvars`;全局异常响应体带 `trace_id`。
   - 新增 `scripts/test_logging.py`(一次运行展示桥接前后对比);trace_id 注入/清理已验证。
   - ⚠️ **取舍(最小实现)**:uvicorn 自带 logging 未统一(强行收编与 `--reload` 时序冲突导致日志重复,故放弃,用中间件请求日志替代 access log);只做请求级 timing,**service 内分段 timing 与细粒度异常状态码映射未做**。面试稿见 `docs/INTERVIEW.md` 条目 G。
+- **Day 6(基础监控)— 已完成(最小实现)**:
+  - 新增 `app/metrics.py`:`prometheus_client` 定义 5 个指标 —— `rag_http_requests_total`(Counter,method/path/status)、`rag_http_request_duration_seconds`(Histogram,桶到 30s)、`rag_llm_tokens_total`(Counter,model/type)、`rag_retrieval_candidates`(Histogram)、`rag_rerank_score`(Histogram)。
+  - `main.py`:`trace_context_middleware` 内接请求指标(用 `scope["route"].path` 当 label 避免高基数,early-return 跳过 /metrics 自身);`app.mount("/metrics", make_asgi_app())` 暴露端点(pull 模型)。
+  - `retrieval.py`:`retrieve` 记召回候选数;`_rerank_chunks` 记 rerank 分数;`_record_token_usage` 在非流式 `_generate_answer` 与流式尾帧(`stream_options={"include_usage": True}`)记 prompt/completion token。`requirements.txt` 加 `prometheus-client`。
+  - 验证:`generate_latest()` 快照见全部 5 个指标(Histogram 分桶 + _count/_sum 正确)。
+  - ⚠️ **取舍**:`rag_rerank_score` 因 `ENABLE_RERANK=False` 暂无数据;`rewrite_query` 的 token 未计入(只统计主生成);未接真实 Prometheus/Grafana,本地 `curl /metrics` 验证为准。
 
 ---
 
@@ -205,8 +212,8 @@
 | ~~Day 3~~(已完成) | 简单前端 | ✅ `web/index.html` 三栏(上传/对话/引用),内置 Markdown 渲染,挂在 `/ui`。详见第 5 节 |
 | ~~Day 4~~(已完成) | 流式输出 | ✅ SSE + `StreamingResponse` + `chat.completions.create(stream=True)` + 前端 `fetch` ReadableStream。拆 `retrieve`/`generate_stream`,先拉一帧分段错误处理。详见第 5 节与 `docs/PITFALLS.md`(P10–P14) |
 | ~~Day 5~~(已完成) | 结构化日志 | ✅ structlog JSON 管道 + 桥接 stdlib + `trace_context_middleware`(trace_id/contextvars)+ 请求级 timing。⚠️ 最小实现:uvicorn 未统一、无分段 timing、无细粒度异常映射。详见第 5 节与 `docs/INTERVIEW.md` 条目 G |
-| **Day 6(下一步)** | 基础监控 | /metrics 端点:QPS/延迟/错误率、token 用量、召回数分布、rerank score 分布。可选接 prometheus_client |
-| Day 7 | Docker 整合 | FastAPI 也容器化,compose 编排两服务,HF 模型缓存 volume 持久化,一键 `docker compose up` |
+| ~~Day 6~~(已完成) | 基础监控 | ✅ `prometheus_client` 5 指标(请求数/延迟/token/召回数/rerank 分数)+ `/metrics` 端点。⚠️ rerank 指标因开关关着无数据、rewrite token 未计、未接 Prometheus/Grafana。详见第 5 节 |
+| **Day 7(下一步)** | Docker 整合 | FastAPI 也容器化,compose 编排两服务,HF 模型缓存 volume 持久化,一键 `docker compose up` |
 
 ### 之后的 Week(24 周课程)
 
@@ -224,6 +231,7 @@
 - **chat 调用无重试**:`rewrite_query` / `_generate_answer` / `_generate_answer_stream` 的 `chat.completions.create` 都是裸调,不像 `embedding.py` 有 tenacity 退避;中转站撞 429/断连直接 502(流式则在开流后变成 error 帧)。生产需补(可复用 embedding 的退避思路,异常类型用 `openai.APIError`)
 - **`ENABLE_RERANK` 当前为 `False`**:`retrieval.py` 的 A/B 开关现在关着,rerank 未生效,召回排序质量打折(流式不受影响)。要测召回质量记得改回 `True`
 - **日志可观测性是最小实现(Day 5)**:uvicorn 自带 logging 未并入统一管道(原生格式、无 trace_id);只有请求级 timing,无 service 内分段 timing(rewrite/retrieve/generate);异常仅全局 500 兜底 + query.py 的 404/502,无细粒度状态码映射(401/403/429/503)。生产需补,详见 `docs/INTERVIEW.md` 条目 G
+- **监控是最小实现(Day 6)**:`rag_rerank_score` 因 `ENABLE_RERANK=False` 无数据;`rewrite_query` 的 token 未计;只暴露 `/metrics`,未接 Prometheus 抓取 + Grafana 看板。生产需补
 - **标题孤儿问题**:Markdown 标题可能被单独切成一个无信息 chunk(如 `## 检索流程`);未处理,Week 13-14 评测暴露后再优化(可选 MarkdownHeaderTextSplitter)
 - **chunk 策略是"凑合能用"**:chunk_size=500/overlap=50 是起步值,未调优;overlap 仅在"切碎超长段落"时生效,纯段落合并不加 overlap
 - **小知识库混合检索优势不明显**:当前测试集 embedding 已很强,混合检索主要起"补强"而非"救场"作用;但多语言/长尾场景仍需要
