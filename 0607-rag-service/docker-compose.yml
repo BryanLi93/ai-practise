@@ -18,5 +18,29 @@ services:
       timeout: 5s
       retries: 10
 
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: rag-app
+    # 注入 OPENAI_API_KEY / OPENAI_BASE_URL / CHAT_MODEL / EMBEDDING_MODEL 等运行时配置
+    env_file:
+      - .env
+    environment:
+      # 覆盖 .env 里的 localhost(那是给宿主机脚本用的):容器内走服务名 + 内部端口 5432
+      DATABASE_URL: postgresql+psycopg://rag:rag@postgres:5432/rag
+      # 容器内没有 shell 的 HF_ENDPOINT,显式设国内镜像站(开 rerank 后下模型才用得上)
+      HF_ENDPOINT: https://hf-mirror.com
+      # 把 HF 缓存目录指到挂了 volume 的路径,rerank 模型只下载一次
+      HF_HOME: /models
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - hf_cache:/models
+
 volumes:
   rag_pg_data:
+  hf_cache:
