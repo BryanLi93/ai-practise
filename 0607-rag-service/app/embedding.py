@@ -94,16 +94,18 @@ async def embed_documents(texts: list[str]) -> list[list[float]]:
 
 
 async def embed_query(text: str) -> list[float]:
-    cache = await cache_get_json(_embed_cache_key(text))
-    if cache is None:
-        """
-        用户查询时调用。单条调用(OpenAI 无 task_type,query 和 document 同一模型)。
-        """
-        result = await _embed_batch_with_retry([text])
-        embeddings = result[0]
-        await cache_set_json(_embed_cache_key(text), embeddings, 7)
-        return embeddings
-    return cache
+    """
+    用户查询时调用。单条调用(OpenAI 无 task_type,query 和 document 同一模型)。
+    """
+    cache_key = _embed_cache_key(text)
+    cache = await cache_get_json(cache_key)
+    if cache is not None:
+        return cache
+    
+    embeddings = (await _embed_batch_with_retry([text]))[0]
+    await cache_set_json(cache_key, embeddings, 60*60*24*7)
+    return embeddings
+    
 
 
 

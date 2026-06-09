@@ -1,5 +1,6 @@
 import uuid
 import logging
+import hashlib
 from collections.abc import AsyncIterator
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -7,10 +8,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models import Message
 from app.llm import get_openai_client
 from app.config import settings
-from app.services.retrieval import query as run_query
+from app.services.retrieval import query as run_query, QueryResult
 from app.services import conversation as conv_service
 from app.schemas import Source, QueryResponse
 from app.services.retrieval import retrieve, generate_stream, NO_CONTEXT_ANSWER
+from app.cache import cache_get_json, cache_set_json
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +37,9 @@ REWRITE_USER_PROMPT_TEMPLATE = """
 
 """
 
-async def rewrite_query(question: str, recent_messages: list[Message]) -> str:
+# ---------- 内部函数 ----------
+
+async def _rewrite_query(question: str, recent_messages: list[Message]) -> str:
     # 查询重写
     client = get_openai_client()
     messages = [f"{m.role}:{m.content}" for m in recent_messages]
@@ -57,6 +61,10 @@ async def rewrite_query(question: str, recent_messages: list[Message]) -> str:
 
     return content.strip()
 
+def _answer_cache_key(text: str, top_k: int) -> str:
+    h  = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    return f"ans:{settings.chat_model}:{top_k}:{h}"
+
 
 # ---------- 两条链路共用的编排零件 ----------
 async def _prepare(
@@ -76,7 +84,7 @@ async def _prepare(
     # 2. 有历史才改写(第一轮没历史,省一次 LLM 调用)
     search_query = req_question
     if recent_messages:
-        search_query = await rewrite_query(req_question, recent_messages)
+        search_query = await _rewrite_query(req_question, recent_messages)
         logger.info("rewrite: %r -> %r", req_question, search_query)
     return recent_messages, search_query
 
@@ -140,6 +148,17 @@ async def handle_chat(
     recent_messages, search_query = await _prepare(db, req_conversation_id, req_question)
 
     # 3. 检索 + 生成(无 DB 写入)
+    is_cacheable = not recent_messages
+    cache_key = _answer_cache_key(req_question, req_top_k) if is_cacheable else None
+
+    if cache_key:
+        cached = await cache_get_json(cache_key)
+        if cached is not None:
+            logger.info("answer cache HIT")
+            sources = [Source(**d) for d in cached["sources"]] # dict -> Source 对象
+            conversation_id = await _persist(db, req_conversation_id, req_question, cached["answer"], cached["sources"])
+            return QueryResponse(answer=cached["answer"], sources=sources, conversation_id=conversation_id)
+
     result = await run_query(
         db,
         question=req_question,
@@ -147,9 +166,12 @@ async def handle_chat(
         recent_messages=recent_messages,
         top_k=req_top_k,
     )
-    
     sources = _build_sources(result.sources)
     sources_payload = [s.model_dump() for s in sources]
+
+    if cache_key:
+        await cache_set_json(cache_key, { "answer": result.answer, "sources": sources_payload }, ttl=60*60)
+
     conversation_id = await _persist(db, req_conversation_id, req_question, result.answer, sources_payload)
 
     # 6. 返回
