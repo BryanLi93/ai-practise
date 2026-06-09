@@ -33,14 +33,31 @@ services:
       HF_ENDPOINT: https://hf-mirror.com
       # 把 HF 缓存目录指到挂了 volume 的路径,rerank 模型只下载一次
       HF_HOME: /models
+      # 容器内走服务名 + 内部端口 6379(host 脚本才用 localhost:6380
+      REDIS_URL: redis://redis:6379/0
     ports:
       - "8000:8000"
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_healthy
     volumes:
       - hf_cache:/models
+  redis:
+    image: redis:7-alpine
+    container_name: rag-redis
+    ports:
+      - "6380:6379"        # host 6380→容器 6379:你本机 6379 已被一个 redis 占用,避让
+    volumes:
+      - rag_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 5s
+      retries: 10
 
 volumes:
   rag_pg_data:
   hf_cache:
+  rag_redis_data:

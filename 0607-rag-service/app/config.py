@@ -12,6 +12,7 @@ class Settings(BaseSettings):
 
     # Database
     database_url: str
+    redis_url: str = "redis://localhost:6380/0"
 
     # App
     log_level: str = "INFO"

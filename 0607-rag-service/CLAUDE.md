@@ -1,7 +1,8 @@
 # RAG Service — 项目上下文（交接自 PROJECT_CONTEXT.md）
 
 > 本文件由长期对话的交接文档迁移而来,Claude Code 启动时自动读取为项目上下文。
-> **状态已于 2026-06-05 核对**:Week 7 Day 6 已完成(基础监控:prometheus_client 5 指标 + /metrics 端点,最小实现),准备进 Day 7(Docker 整合)。
+> **状态已于 2026-06-08 核对**:Week 7 **已全部完成**(Day 7 Docker 整合已提交 `1bed96a`:app 镜像 + compose 编排两服务 + HF 缓存 volume),现进 **Week 8(后端工程化)**。
+> Week 8 已对齐总规划:原计划「日志/Docker 多服务/基础监控」已在 Week 7 Day 5-7 提前完成,实际只剩 **Redis 缓存**(核心)+ 成本计算(token×单价)+ README 收尾,约 1.5 天。总规划 source of truth 在 Obsidian:`0_Focus/projects/求职AI工作/【Plan】24周细化学习清单.md`。
 > 注意:git 仓库根在**上一级** `~/Documents/my-code/ai-practise`,本项目是其子目录;`.gitignore` 在上级。
 
 ---
@@ -201,10 +202,19 @@
   - `retrieval.py`:`retrieve` 记召回候选数;`_rerank_chunks` 记 rerank 分数;`_record_token_usage` 在非流式 `_generate_answer` 与流式尾帧(`stream_options={"include_usage": True}`)记 prompt/completion token。`requirements.txt` 加 `prometheus-client`。
   - 验证:`generate_latest()` 快照见全部 5 个指标(Histogram 分桶 + _count/_sum 正确)。
   - ⚠️ **取舍**:`rag_rerank_score` 因 `ENABLE_RERANK=False` 暂无数据;`rewrite_query` 的 token 未计入(只统计主生成);未接真实 Prometheus/Grafana,本地 `curl /metrics` 验证为准。
+- **Day 7(Docker 整合)— 已完成**(提交 `1bed96a`):
+  - 新增根目录 `Dockerfile`(app 镜像,`python:3.12-slim`):先单独装 CPU-only torch(官方 CPU 源,避开 ~4GB CUDA 库)→ 装 `libgomp1`(torch 运行时依赖 OpenMP)→ 依赖层与代码层分离复用缓存;`tiktoken` 的 cl100k_base 词表烤进镜像(`TIKTOKEN_CACHE_DIR`,运行时容器内常下载失败)。
+  - 新增 `entrypoint.sh`:先 `python -m scripts.init_db` 幂等建表 → `exec uvicorn ... --host 0.0.0.0`(exec 让 uvicorn 占 PID 1,`docker stop` 的 SIGTERM 才能直达优雅退出)。
+  - 新增 `.dockerignore`:排 `.venv`/`__pycache__`/`.env`/`.git` 等(secrets 不进镜像,运行时由 compose `env_file` 注入)。
+  - `docker-compose.yml` 加 `app` 服务:`depends_on: postgres(service_healthy)`、覆盖 `DATABASE_URL` 走服务名 `postgres:5432`、`HF_HOME=/models` 挂 `hf_cache` volume;一键 `docker compose up`。
 
 ---
 
-## 6. 下一步(Week 7 剩余)
+## 6. 下一步(Week 8 — 后端工程化)
+
+> 总规划(source of truth)在 Obsidian:`0_Focus/projects/求职AI工作/【Plan】24周细化学习清单.md` 第 8 周。下表 Week 7 各 Day 已全部完成,留作索引。
+
+### Week 7(已全部完成)
 
 | Day | 任务 | 关键点 |
 |---|---|---|
@@ -213,7 +223,16 @@
 | ~~Day 4~~(已完成) | 流式输出 | ✅ SSE + `StreamingResponse` + `chat.completions.create(stream=True)` + 前端 `fetch` ReadableStream。拆 `retrieve`/`generate_stream`,先拉一帧分段错误处理。详见第 5 节与 `docs/PITFALLS.md`(P10–P14) |
 | ~~Day 5~~(已完成) | 结构化日志 | ✅ structlog JSON 管道 + 桥接 stdlib + `trace_context_middleware`(trace_id/contextvars)+ 请求级 timing。⚠️ 最小实现:uvicorn 未统一、无分段 timing、无细粒度异常映射。详见第 5 节与 `docs/INTERVIEW.md` 条目 G |
 | ~~Day 6~~(已完成) | 基础监控 | ✅ `prometheus_client` 5 指标(请求数/延迟/token/召回数/rerank 分数)+ `/metrics` 端点。⚠️ rerank 指标因开关关着无数据、rewrite token 未计、未接 Prometheus/Grafana。详见第 5 节 |
-| **Day 7(下一步)** | Docker 整合 | FastAPI 也容器化,compose 编排两服务,HF 模型缓存 volume 持久化,一键 `docker compose up` |
+| ~~Day 7~~(已完成) | Docker 整合 | ✅ 提交 `1bed96a`:`Dockerfile`(app 镜像,torch CPU 版 / tiktoken 词表烤进镜像 / 依赖分层缓存)+ `entrypoint.sh`(建表 → `exec uvicorn` 占 PID 1)+ compose 编排两服务 + HF 缓存 volume + `.dockerignore`,一键 `docker compose up` |
+
+### Week 8 — 后端工程化(进行中,压缩版)
+
+> ⚠️ 原 Week 8 的「日志 / Docker 多服务 / 基础监控」已在 Week 7 Day 5-7 提前完成。实际剩余如下,约 1.5 天。技术债(chat 重试 / service 分段 timing / 语义缓存)**后置**,见第 7 节。
+
+| 步骤 | 任务 | 关键点 |
+|---|---|---|
+| **Day 1(下一步)** | Redis 缓存 | 唯一全新内容。Redis 进 compose;先缓存 **Embedding**(`(model, text)` 纯函数最安全,key 带 model 防换模型读脏向量);**LLM 响应缓存**只做**无历史首轮**(带历史非纯函数,不能简单缓存);`redis-py` async + TTL;对比有无缓存延迟 |
+| Day 2 | 成本计算 + 收尾 | 补 Day 6 缺口:token×单价累计成本指标 + `rewrite_query` 的 token 计入;README 补架构图 / 运行方式;确认全栈(含 Redis)`docker compose up` 无报错 |
 
 ### 之后的 Week(24 周课程)
 
