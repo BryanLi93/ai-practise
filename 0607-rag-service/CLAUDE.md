@@ -1,8 +1,8 @@
 # RAG Service — 项目上下文（交接自 PROJECT_CONTEXT.md）
 
 > 本文件由长期对话的交接文档迁移而来,Claude Code 启动时自动读取为项目上下文。
-> **状态已于 2026-06-08 核对**:Week 7 **已全部完成**(Day 7 Docker 整合已提交 `1bed96a`:app 镜像 + compose 编排两服务 + HF 缓存 volume),现进 **Week 8(后端工程化)**。
-> Week 8 已对齐总规划:原计划「日志/Docker 多服务/基础监控」已在 Week 7 Day 5-7 提前完成,实际只剩 **Redis 缓存**(核心)+ 成本计算(token×单价)+ README 收尾,约 1.5 天。总规划 source of truth 在 Obsidian:`0_Focus/projects/求职AI工作/【Plan】24周细化学习清单.md`。
+> **状态已于 2026-06-09 核对**:**Week 8(后端工程化)已完成** —— Redis 缓存(embedding + 首轮答案 + 流式重放 + best-effort 降级)、成本指标(token×单价)+ rewrite token 计入、README 收尾。下一步进 **Week 9-10(LangGraph Agent)**。
+> 总规划 source of truth 在 Obsidian:`0_Focus/projects/求职AI工作/【Plan】24周细化学习清单.md`。Week 8 详情见第 5 节、技术债见第 7 节。
 > 注意:git 仓库根在**上一级** `~/Documents/my-code/ai-practise`,本项目是其子目录;`.gitignore` 在上级。
 
 ---
@@ -56,7 +56,8 @@
 | Rerank | `BAAI/bge-reranker-v2-m3` | 经 `sentence-transformers` 加载,本地推理 |
 | 限流重试 | `tenacity` | 指数退避 |
 | 日志 | `structlog` | 结构化 JSON 管道 + 桥接 stdlib;contextvars 注入 trace_id |
-| 监控 | `prometheus-client` | Counter/Histogram + `/metrics` 端点(pull 模型) |
+| 监控 | `prometheus-client` | Counter/Histogram + `/metrics` 端点(pull 模型);含 token/延迟/成本 |
+| 缓存 | `redis`(`redis.asyncio`) | embedding + 首轮答案缓存,best-effort 降级;host 6380→容器 6379 |
 | 分块 | `langchain-text-splitters` | RecursiveCharacterTextSplitter |
 | token 估算 | `tiktoken` | cl100k_base(对 gpt-5.4 是近似值) |
 | PDF 解析 | `pymupdf`(fitz) | |
@@ -208,9 +209,22 @@
   - 新增 `.dockerignore`:排 `.venv`/`__pycache__`/`.env`/`.git` 等(secrets 不进镜像,运行时由 compose `env_file` 注入)。
   - `docker-compose.yml` 加 `app` 服务:`depends_on: postgres(service_healthy)`、覆盖 `DATABASE_URL` 走服务名 `postgres:5432`、`HF_HOME=/models` 挂 `hf_cache` volume;一键 `docker compose up`。
 
+### Week 8 — 后端工程化(压缩版,已完成)
+- **Day 1(Redis 缓存)— 已完成**:
+  - 新增 `app/cache.py`:`get_redis()` 单例(`redis.asyncio.from_url`,`decode_responses=True`)+ 通用 `cache_get_json` / `cache_set_json`(封装序列化 + **best-effort 降级**:吞 `RedisError` 当未命中/不写,绝不拖垮主流程)。
+  - **Embedding 缓存**(`embedding.py` 的 `embed_query`):key=`emb:{model}:{dim}:{sha256(text)}`(带 model/dim 防换模型读脏向量),纯函数,TTL 7 天(纯内存策略)。
+  - **答案缓存**(`chat.py` 的 `handle_chat` + `handle_chat_stream`):key=`ans:{chat_model}:{top_k}:{sha256(question)}`,**只缓存无历史首轮**(`not recent_messages`;带历史非纯函数会串味);TTL 1 小时(正确性折中,知识库更新后过时)。命中即落库后早返回。**流式命中按同一帧协议重放**(sources → 整段答案一帧 token → done),前端无感知。
+  - 易错点:漏 `await` 导致 SET 静默失效;命中分支误把缓存 dict 当 `QueryResult` 对象用(`result.answer` 崩——dict 只认 `["..."]`、dataclass 只认 `.`),靠"命中分支早 return、dict 不流到下游"解决。
+  - compose 加 `redis` 服务(host 6380→容器 6379,避让本机已占的 6379)+ `rag_redis_data` volume;app 加 `REDIS_URL=redis://redis:6379/0` 覆盖。验证脚本:`scripts/test_redis.py` / `test_embed_cache.py` / `bench_cache.py`。
+- **Day 2(成本计算 + 收尾)— 已完成**:
+  - `metrics.py` 加 `MODEL_PRICES` 单价表 + `rag_llm_cost_total` Counter + 统一入口 `record_usage(model, usage)`(记 token + 按单价累加成本;embedding 的 usage 无 `completion_tokens`,用 `getattr` 兜底)。
+  - `retrieval.py` 的 `_record_token_usage` 改为委托 `record_usage`;`chat.py` 的 `_rewrite_query` 补 `record_usage`——**补上原先漏计的 rewrite token**(Day 6 缺口)。
+  - README 重写:架构图(mermaid 请求流 + compose 编排)、两种运行方式(全栈一键 / 本地开发)、API 表、缓存与成本的已知限制 + 面试题。`docker compose config` 校验三服务编排合法。
+  - ⚠️ 待本机冒烟:`docker compose up --build` 全栈起通 + `/metrics` 见非 0 `rag_llm_cost_total`(需先把 `MODEL_PRICES` 换成中转站实际单价)。
+
 ---
 
-## 6. 下一步(Week 8 — 后端工程化)
+## 6. 下一步(Week 9-10 — LangGraph Agent)
 
 > 总规划(source of truth)在 Obsidian:`0_Focus/projects/求职AI工作/【Plan】24周细化学习清单.md` 第 8 周。下表 Week 7 各 Day 已全部完成,留作索引。
 
@@ -225,14 +239,18 @@
 | ~~Day 6~~(已完成) | 基础监控 | ✅ `prometheus_client` 5 指标(请求数/延迟/token/召回数/rerank 分数)+ `/metrics` 端点。⚠️ rerank 指标因开关关着无数据、rewrite token 未计、未接 Prometheus/Grafana。详见第 5 节 |
 | ~~Day 7~~(已完成) | Docker 整合 | ✅ 提交 `1bed96a`:`Dockerfile`(app 镜像,torch CPU 版 / tiktoken 词表烤进镜像 / 依赖分层缓存)+ `entrypoint.sh`(建表 → `exec uvicorn` 占 PID 1)+ compose 编排两服务 + HF 缓存 volume + `.dockerignore`,一键 `docker compose up` |
 
-### Week 8 — 后端工程化(进行中,压缩版)
+### Week 8 — 后端工程化(压缩版,已全部完成)
 
-> ⚠️ 原 Week 8 的「日志 / Docker 多服务 / 基础监控」已在 Week 7 Day 5-7 提前完成。实际剩余如下,约 1.5 天。技术债(chat 重试 / service 分段 timing / 语义缓存)**后置**,见第 7 节。
+> 原 Week 8 的「日志 / Docker 多服务 / 基础监控」已在 Week 7 Day 5-7 提前完成,本周实际只做了 Redis 缓存 + 成本 + README。详情见第 5 节。技术债(chat 重试 / service 分段 timing / 语义缓存 / 答案缓存精确失效)**后置**,见第 7 节。
 
 | 步骤 | 任务 | 关键点 |
 |---|---|---|
-| **Day 1(下一步)** | Redis 缓存 | 唯一全新内容。Redis 进 compose;先缓存 **Embedding**(`(model, text)` 纯函数最安全,key 带 model 防换模型读脏向量);**LLM 响应缓存**只做**无历史首轮**(带历史非纯函数,不能简单缓存);`redis-py` async + TTL;对比有无缓存延迟 |
-| Day 2 | 成本计算 + 收尾 | 补 Day 6 缺口:token×单价累计成本指标 + `rewrite_query` 的 token 计入;README 补架构图 / 运行方式;确认全栈(含 Redis)`docker compose up` 无报错 |
+| ~~Day 1~~(已完成) | Redis 缓存 | ✅ `cache.py`(单例 + best-effort JSON helper);embedding 缓存(纯函数,7 天)+ 首轮答案缓存(1 小时,流式重放);compose 加 redis(6380→6379)。详见第 5 节 |
+| ~~Day 2~~(已完成) | 成本计算 + 收尾 | ✅ `rag_llm_cost_total`(token×单价)+ 统一 `record_usage` 把 rewrite token 计入;README 重写(架构图/运行方式/API);compose config 校验。详见第 5 节 |
+
+### Week 9-10 — LangGraph Agent(下一步)
+
+> ⚠️ Week 7 的多轮对话 ≠ Agent;Agent 是 LLM 自己决定调用工具的多步任务。方法论:先手写一个最简 chaining 再上 LangGraph(建立对比理解)。详见 Obsidian 总规划第 9-10 周 + `docs/ROADMAP.md`。
 
 ### 之后的 Week(24 周课程)
 
@@ -250,7 +268,8 @@
 - **chat 调用无重试**:`rewrite_query` / `_generate_answer` / `_generate_answer_stream` 的 `chat.completions.create` 都是裸调,不像 `embedding.py` 有 tenacity 退避;中转站撞 429/断连直接 502(流式则在开流后变成 error 帧)。生产需补(可复用 embedding 的退避思路,异常类型用 `openai.APIError`)
 - **`ENABLE_RERANK` 当前为 `False`**:`retrieval.py` 的 A/B 开关现在关着,rerank 未生效,召回排序质量打折(流式不受影响)。要测召回质量记得改回 `True`
 - **日志可观测性是最小实现(Day 5)**:uvicorn 自带 logging 未并入统一管道(原生格式、无 trace_id);只有请求级 timing,无 service 内分段 timing(rewrite/retrieve/generate);异常仅全局 500 兜底 + query.py 的 404/502,无细粒度状态码映射(401/403/429/503)。生产需补,详见 `docs/INTERVIEW.md` 条目 G
-- **监控是最小实现(Day 6)**:`rag_rerank_score` 因 `ENABLE_RERANK=False` 无数据;`rewrite_query` 的 token 未计;只暴露 `/metrics`,未接 Prometheus 抓取 + Grafana 看板。生产需补
+- **监控是最小实现(Day 6/8)**:`rag_rerank_score` 因 `ENABLE_RERANK=False` 无数据;只暴露 `/metrics`,未接 Prometheus 抓取 + Grafana 看板。生产需补。(rewrite token 已于 Week 8 补计;成本 `rag_llm_cost_total` 已加,但 `MODEL_PRICES` 是**占位单价**,需按中转站实际计费改才有意义,currency 单位也取决于中转站)
+- **答案缓存无精确失效(Week 8)**:`ans:*` 只靠 TTL(1 小时)容忍过时,上传新文档后不会主动清相关缓存,旧答案最长存活 1 小时。生产应在 `/upload` 成功后清 `ans:*`(或更细粒度)。另:embedding 缓存未做"惊群"防护(同一冷 key 并发全部 miss 各打一次 API)、未做二进制紧凑序列化(现 JSON ~20-30KB/条);**语义缓存**(按相似度命中近义问)未做
 - **标题孤儿问题**:Markdown 标题可能被单独切成一个无信息 chunk(如 `## 检索流程`);未处理,Week 13-14 评测暴露后再优化(可选 MarkdownHeaderTextSplitter)
 - **chunk 策略是"凑合能用"**:chunk_size=500/overlap=50 是起步值,未调优;overlap 仅在"切碎超长段落"时生效,纯段落合并不加 overlap
 - **小知识库混合检索优势不明显**:当前测试集 embedding 已很强,混合检索主要起"补强"而非"救场"作用;但多语言/长尾场景仍需要
