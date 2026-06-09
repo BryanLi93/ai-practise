@@ -1,5 +1,8 @@
-from app.config import settings
-from app.llm import get_openai_client
+import asyncio
+import logging
+import httpx
+import hashlib
+
 from openai import APIError
 from tenacity import (
     AsyncRetrying,
@@ -8,9 +11,11 @@ from tenacity import (
     wait_exponential,
     before_sleep_log,
 )
-import asyncio
-import logging
-import httpx
+
+from app.config import settings
+from app.llm import get_openai_client
+from app.cache import cache_get_json, cache_set_json
+
 logger = logging.getLogger(__name__)
 
 # ---------- 常量 ----------
@@ -50,6 +55,10 @@ async def _embed_batch_with_retry(texts: list[str]) -> list[list[float]]:
     # tenacity 保证 reraise=True 时这里不会被执行
     raise RuntimeError("unreachable")
 
+def _embed_cache_key(text: str) -> str:
+    h  = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    return f"emb:{settings.embedding_model}:{settings.embedding_dim}:{h}"
+
 # ---------- 对外接口 ----------
 
 async def embed_documents(texts: list[str]) -> list[list[float]]:
@@ -85,8 +94,16 @@ async def embed_documents(texts: list[str]) -> list[list[float]]:
 
 
 async def embed_query(text: str) -> list[float]:
-    """
-    用户查询时调用。单条调用(OpenAI 无 task_type,query 和 document 同一模型)。
-    """
-    embeddings = await _embed_batch_with_retry([text])
-    return embeddings[0]
+    cache = await cache_get_json(_embed_cache_key(text))
+    if cache is None:
+        """
+        用户查询时调用。单条调用(OpenAI 无 task_type,query 和 document 同一模型)。
+        """
+        result = await _embed_batch_with_retry([text])
+        embeddings = result[0]
+        await cache_set_json(_embed_cache_key(text), embeddings, 7)
+        return embeddings
+    return cache
+
+
+
