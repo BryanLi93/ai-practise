@@ -47,3 +47,32 @@ RERANK_SCORE = Histogram(
     "rerank cross-encoder 打分分布",
     buckets=(-10, -5, -2, 0, 2, 5, 10),  # bge-reranker logits 大致范围
 )
+
+# ---------- 成本(token × 单价)----------
+# 单价 = 每 1K token 的价格。⚠️ 占位示例,务必改成你中转站的实际计费(单位看你中转站:元/美元)。
+MODEL_PRICES: dict[str, dict[str, float]] = {
+    "gpt-5.4": {"prompt": 0.002, "completion": 0.008},            # ← 改成实际单价 / 1K token
+    "text-embedding-3-small": {"prompt": 0.00002, "completion": 0.0},
+}
+
+LLM_COST = Counter(
+    "rag_llm_cost_total",
+    "LLM 调用累计成本(token × 单价,单位见 MODEL_PRICES)",
+    labelnames=("model",),
+)
+
+
+def record_usage(model: str, usage) -> None:
+    """一次 LLM 调用的 token 用量记进指标,并按单价累加成本。usage 可能为 None。"""
+    if not usage:
+        return
+    prompt = usage.prompt_tokens
+    # embedding 的 usage 没有 completion_tokens,用 getattr 兜底防 AttributeError
+    completion = getattr(usage, "completion_tokens", 0) or 0
+    LLM_TOKENS.labels(model, "prompt").inc(prompt)
+    LLM_TOKENS.labels(model, "completion").inc(completion)
+
+    price = MODEL_PRICES.get(model)
+    if price:
+        cost = prompt / 1000 * price["prompt"] + completion / 1000 * price["completion"]
+        LLM_COST.labels(model).inc(cost)

@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models import Message
 from app.llm import get_openai_client
 from app.config import settings
+from app import metrics
 from app.services.retrieval import query as run_query, QueryResult
 from app.services import conversation as conv_service
 from app.schemas import Source, QueryResponse
@@ -37,6 +38,8 @@ REWRITE_USER_PROMPT_TEMPLATE = """
 
 """
 
+ANSWER_CACHE_TTL = 60 * 60   # 1 小时:答案随知识库更新过期,TTL 是正确性折中
+
 # ---------- 内部函数 ----------
 
 async def _rewrite_query(question: str, recent_messages: list[Message]) -> str:
@@ -54,6 +57,7 @@ async def _rewrite_query(question: str, recent_messages: list[Message]) -> str:
         temperature=0.1,
         max_tokens=256,
     )
+    metrics.record_usage(settings.chat_model, response.usage)
 
     content = response.choices[0].message.content
     if not content:
@@ -170,7 +174,7 @@ async def handle_chat(
     sources_payload = [s.model_dump() for s in sources]
 
     if cache_key:
-        await cache_set_json(cache_key, { "answer": result.answer, "sources": sources_payload }, ttl=60*60)
+        await cache_set_json(cache_key, { "answer": result.answer, "sources": sources_payload }, ttl=ANSWER_CACHE_TTL)
 
     conversation_id = await _persist(db, req_conversation_id, req_question, result.answer, sources_payload)
 
@@ -185,6 +189,21 @@ async def handle_chat_stream(
 ) -> AsyncIterator[dict]:
     # """流式:sources 整包先发,answer 逐 token 发,done 收尾。写库时机同 handle_chat。"""
     recent_messages, search_query = await _prepare(db, req_conversation_id, req_question)
+    
+    is_cacheable = not recent_messages
+    cache_key = _answer_cache_key(req_question, req_top_k) if is_cacheable else None
+    
+    if cache_key:
+        cached = await cache_get_json(cache_key)
+        if cached is not None:
+            logger.info("answer cache HIT (stream)")
+            yield {"type": "sources", "sources": cached["sources"]}
+            yield {"type": "token", "text": cached["answer"]}
+            conversation_id = await _persist(db, req_conversation_id, req_question, cached["answer"], cached["sources"])
+            yield {"type": "done", "conversation_id": str(conversation_id)}
+            return
+    
+    # 未命中缓存:照旧检索 + 逐 token 生成
     retrieved = await retrieve(db, search_query=search_query, top_k=req_top_k)
 
     sources = _build_sources(retrieved)
@@ -200,6 +219,11 @@ async def handle_chat_stream(
     else:
         answer = NO_CONTEXT_ANSWER
         yield {"type": "token", "text": answer}
+
+    if cache_key:
+        await cache_set_json(
+            cache_key, { "answer": answer, "sources": sources_payload }, ttl=ANSWER_CACHE_TTL
+        )
     
     conversation_id = await _persist(db, req_conversation_id, req_question, answer, sources_payload)
     yield {"type": "done", "conversation_id": str(conversation_id)}

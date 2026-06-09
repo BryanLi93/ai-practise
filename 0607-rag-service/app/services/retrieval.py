@@ -303,11 +303,8 @@ def _build_user_prompt(question: str, context: str, recent_messages: list[Messag
     return user_prompt
 
 def _record_token_usage(usage) -> None:
-    """把一次 chat 调用的 token 用量累加进指标(usage 可能为 None)。"""
-    if not usage:
-        return
-    metrics.LLM_TOKENS.labels(settings.chat_model, "prompt").inc(usage.prompt_tokens)
-    metrics.LLM_TOKENS.labels(settings.chat_model, "completion").inc(usage.completion_tokens)
+    """委托给 metrics.record_usage(现在同时记 token + 成本)。usage 可能为 None。"""
+    metrics.record_usage(settings.chat_model, usage)
 
 
 async def _generate_answer(question: str, context: str, recent_messages: list[Message]) -> str:
