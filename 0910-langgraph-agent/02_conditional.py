@@ -1,5 +1,6 @@
 from typing import TypedDict, Literal
 from langgraph.graph import StateGraph, START, END
+from llm import get_chat_client
 
 type TYPE_CATEGORY = Literal['chat', 'calc'] | None
 
@@ -19,7 +20,8 @@ def node_calc(state: MyState) -> dict:
 
 def node_chat(state: MyState) -> dict:
     print('in node_chat')
-    return { "answer": "你好👋" }
+    response = get_chat_client().invoke(state["query"])
+    return { "answer": response.content }
 
 def route_think(state: MyState) -> TYPE_CATEGORY:
     return state["category"]

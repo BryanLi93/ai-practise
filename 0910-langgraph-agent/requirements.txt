@@ -6,3 +6,4 @@ langchain-openai
 python-dotenv
 # 配置校验(rag-service 也用,后面定义 Settings 会用到)
 pydantic-settings
+python-dotenv
