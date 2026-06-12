@@ -36,7 +36,7 @@ if __name__ == "__main__":
     builder.add_edge(START, "llm")
     builder.add_edge("llm", "tool")
     builder.add_edge("tool", "resp")
-    builder.add_edge("llm", END)
+    builder.add_edge("resp", END)
 
     graph = builder.compile()
     result = graph.invoke({ "messages": [HumanMessage(content="3 加 5 等于几?")] })
