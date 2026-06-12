@@ -66,6 +66,14 @@
 - 调试:`graph.get_graph().print_ascii()` / `.draw_mermaid()` 把图画出来看(`draw_mermaid()` 文本可贴 mermaid.live 渲染)。
 - 来源:Step 4(死循环)。
 
+### Q7　LangGraph 怎么做持久化 / 多会话记忆?(中高频)
+- **Checkpointer**:自动保存每一步的 state,按 `thread_id` 存取;下次同 `thread_id` invoke **自动恢复历史**(只需传新消息,不用手动拼)。
+- **后端选择**:`InMemorySaver`(内存,重启丢,base 包免装)/ `SqliteSaver`·`PostgresSaver`(落盘,重启不丢,**需装独立包** `langgraph-checkpoint-sqlite`/`-postgres`)。
+- `thread_id` = **会话隔离**:多用户 / 多会话各自独立。
+- 对比手动传历史(Step 3):checkpointer 自动恢复,`invoke` 只传新消息。
+- 这也是 **HITL(人类介入)的基础**——状态能存盘,才能"暂停 → 等人 → 恢复"。
+- 来源:Step 6。
+
 ## 四、工程细节(加分项,非高频)
 
 - **接 OpenAI 兼容中转站**:`ChatOpenAI` 不传 `api_key`/`base_url` 也能用——`OPENAI_API_KEY`/`OPENAI_BASE_URL` 是 langchain / openai SDK 源码里写死的标准环境变量名,会自动读取(同 rag-service 的中转站方案)。
