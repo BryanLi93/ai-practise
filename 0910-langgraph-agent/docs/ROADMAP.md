@@ -38,7 +38,7 @@
 |---|---|---|---|
 | **1** ✅ | 最小图 | `State`(TypedDict)/ 节点 / 边 / reducer(`Annotated[list, operator.add]`)/ `compile` / `invoke` | **练习:两节点直线图,逐字追踪 reducer 累加**(用户自写,已跑通)→ `01_graph.py` |
 | **2** ✅ | 条件分支 + START/END | `add_conditional_edges`:路由函数读 state 决定走哪条边;`START`/`END` 锚点 | **练习:带分支的"问题 → 思考 → 回答"**(判类型:闲聊→chat / 含数字→calc)。用户自写,已跑通;用了 `Literal` 注解约束标签,判断放 route 直读 query → `02_conditional.py` |
-| **3** ✅ | 接 LLM 节点 | `ChatOpenAI` 接中转站(复用 rag-service 的 `.env`) | LLM 接入已完成:`llm.py` 单例封装(SecretStr)+ `02_conditional.py` 的 `node_chat` 接真 LLM。⏭ `MessagesState` + `add_messages`(多轮)推迟到下一步单独做 |
+| **3** ✅ | 接 LLM 节点 + 多轮 | `ChatOpenAI` 接中转站(复用 rag-service 的 `.env`);`MessagesState` + `add_messages` | 全部完成:`llm.py` 单例封装(SecretStr)+ `02_conditional.py` 的 `node_chat` 接真 LLM;`03_chatbot.py` 用 `MessagesState` 做多轮,亲手验证"带历史 vs 不带历史"——LLM 无状态,记忆靠每轮传历史 |
 | **4** | 工具调用 | `@tool` 定义工具 → `llm.bind_tools([...])` → 观察 LLM 返回 `tool_calls`;`ToolNode` 执行工具;条件路由"模型决定调哪个工具"。**Agent vs 多轮对话的分水岭** | `tool_calling.py` |
 | **5** | Agent loop | 先**手写** `LLM → ToolNode → LLM` 循环(条件边判断是否还有 tool_call);再用 `create_agent` 一行替换,对比 | **练习:"搜索 + 计算器" Agent** → `react_manual.py` / `react_prebuilt.py` |
 | **6** | 持久化 Checkpointer | **先装包** `pip install langgraph-checkpoint-sqlite`;`SqliteSaver` + `thread_id` 多会话;中断后从 checkpoint 恢复执行(你 rag-service 有 Postgres,也可换 `PostgresSaver`)。对照「服务端持有历史」 | **练习:可中断 → 恢复执行**的工作流(「人工确认」那步衔接 W10 Step 7) → `checkpoint.py` |
