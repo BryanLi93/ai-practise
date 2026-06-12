@@ -2,6 +2,8 @@
 langgraph
 # 接 LLM:走 OpenAI 兼容中转站(同 rag-service 的 OPENAI_BASE_URL/KEY)
 langchain-openai
+# Agent 高层封装:langchain.agents.create_agent(1.0 推荐,替代 create_react_agent)
+langchain
 # 读 .env
 python-dotenv
 # 配置校验(rag-service 也用,后面定义 Settings 会用到)

@@ -40,7 +40,7 @@
 | **2** ✅ | 条件分支 + START/END | `add_conditional_edges`:路由函数读 state 决定走哪条边;`START`/`END` 锚点 | **练习:带分支的"问题 → 思考 → 回答"**(判类型:闲聊→chat / 含数字→calc)。用户自写,已跑通;用了 `Literal` 注解约束标签,判断放 route 直读 query → `02_conditional.py` |
 | **3** ✅ | 接 LLM 节点 + 多轮 | `ChatOpenAI` 接中转站(复用 rag-service 的 `.env`);`MessagesState` + `add_messages` | 全部完成:`llm.py` 单例封装(SecretStr)+ `02_conditional.py` 的 `node_chat` 接真 LLM;`03_chatbot.py` 用 `MessagesState` 做多轮,亲手验证"带历史 vs 不带历史"——LLM 无状态,记忆靠每轮传历史 |
 | **4** ✅ | 工具调用 | `@tool` → `bind_tools` → 观察 `tool_calls`;`ToolNode`(必须在图里跑)执行工具。**Agent vs 多轮对话的分水岭** | `04_tools.py`(看 tool_calls)+ `04_tool_agent.py`(LLM→ToolNode→LLM 一次往返,线性版)。踩了死循环坑(回头边)+ 学了 `print_ascii()`/`draw_mermaid()` 可视化。条件路由的循环版留 Step 5 |
-| **5** | Agent loop | 先**手写** `LLM → ToolNode → LLM` 循环(条件边判断是否还有 tool_call);再用 `create_agent` 一行替换,对比 | **练习:"搜索 + 计算器" Agent** → `react_manual.py` / `react_prebuilt.py` |
+| **5** ✅ | Agent loop | 手写 `LLM ⇄ ToolNode` 循环(`should_continue` 条件边判断有无 tool_call);再用 `create_agent`(`langchain.agents`,1.0)一行替换,对比 | `05_agent_loop.py`:add+multiply 双工具,链式问题逼出循环 2 轮;手写版与 `create_agent` 内部图同构(`model ⇄ tools`+条件边)、结果一致。学了 `isinstance` 类型收窄 |
 | **6** | 持久化 Checkpointer | **先装包** `pip install langgraph-checkpoint-sqlite`;`SqliteSaver` + `thread_id` 多会话;中断后从 checkpoint 恢复执行(你 rag-service 有 Postgres,也可换 `PostgresSaver`)。对照「服务端持有历史」 | **练习:可中断 → 恢复执行**的工作流(「人工确认」那步衔接 W10 Step 7) → `checkpoint.py` |
 
 ## Week 10 — 人类介入 / 容错 / 可观测(截止 📅 2026-06-18)

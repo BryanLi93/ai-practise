@@ -31,6 +31,20 @@
 - **Agent Loop**:`LLM → 工具 → LLM → 工具 → …` 直到 LLM 判断不再需要工具才结束。
 - 来源:Step 4。
 
+### Q3.5　LangChain 和 LangGraph 什么区别?用哪个?(高频)
+**一句话**:LangGraph 是**底层图编排引擎**(精确控制流程);LangChain 是**组件库 + 高层封装**(`create_agent` 开箱即用)。不对立,是**分层**——`create_agent` 底层就是用 langgraph 跑的(返回 `CompiledStateGraph`),两者共享 `langchain-core`(消息/工具/模型接口)。
+- **用哪个**:默认 `create_agent`(一行);当需要**精确控制**(拦截/改中间步、加人类审批、自定义循环/分支、多 agent、自定义 state)时,落到 langgraph 手搭图。
+- 亲历(Step 5):手写 agent loop(langgraph) == `create_agent`(langchain)一行,结果完全一样。
+- 三层:`langchain`(封装) → `langgraph`(引擎) → `langchain-core`(共享底座)。
+- 来源:Step 5。
+
+### Q3.6　Agent Loop 具体怎么手写实现?
+- 两个节点:`model`(调 LLM)+ `tools`(`ToolNode` 执行工具)。
+- **条件边**:路由函数读最后一条 `AIMessage`,有 `tool_calls` → 去 `tools`,没有 → END。
+- `tools → model` **回边**形成循环;**为什么不死循环**:出边是条件边(二选一),LLM 不再出 `tool_calls` 时走 END(`recursion_limit` 默认 25 兜底)。
+- `create_agent` 一行 = 这整套的封装(亲测内部图同构:`model ⇄ tools` + 条件边)。
+- 来源:Step 5。
+
 ## 三、LangGraph 核心机制(中高频)
 
 ### Q4　LangGraph 怎么管理 / 更新状态?
