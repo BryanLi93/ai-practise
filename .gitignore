@@ -3,3 +3,7 @@ __pycache__/
 .venv/
 .env
 .claude/
+.DS_Store
+*.db
+*.db-*
+.langgraph_api/
