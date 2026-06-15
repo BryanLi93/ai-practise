@@ -74,6 +74,14 @@
 - 这也是 **HITL(人类介入)的基础**——状态能存盘,才能"暂停 → 等人 → 恢复"。
 - 来源:Step 6。
 
+### Q8　LangGraph 怎么实现 Human-in-the-loop?(中频)
+- **`interrupt(问题)`**:在节点里调用,图**当场暂停**,把"问题"放进返回的 `__interrupt__` 抛给人。
+- **`Command(resume=答案)`**:人决定后 invoke 恢复,`interrupt()` 返回那个答案,节点接着跑。
+- **必须配 checkpointer + thread_id**(暂停状态存盘、恢复读回)——HITL 建在持久化之上。
+- **版本**:1.x 主推 `interrupt()`(runtime 动态);旧 `interrupt_before`/`interrupt_after`(compile 静态)是老写法。
+- **反直觉坑**:resume 时节点**从头重跑**,`interrupt()` 之前别放副作用(发邮件/写库会重复执行);正确模式是审批节点只问、副作用放批准后的独立节点。
+- 来源:Step 7。
+
 ## 四、工程细节(加分项,非高频)
 
 - **接 OpenAI 兼容中转站**:`ChatOpenAI` 不传 `api_key`/`base_url` 也能用——`OPENAI_API_KEY`/`OPENAI_BASE_URL` 是 langchain / openai SDK 源码里写死的标准环境变量名,会自动读取(同 rag-service 的中转站方案)。

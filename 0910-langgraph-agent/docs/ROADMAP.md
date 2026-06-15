@@ -49,7 +49,7 @@
 
 | Step | 主题 | 内容 | 练习 / 产出 |
 |---|---|---|---|
-| **7** | Human-in-the-loop | `interrupt()` 暂停 + `Command(resume=...)` 恢复(**1.x 动态写法**,需配 Step 6 的 checkpointer);审批节点设计。⚠️ 老教程的 `interrupt_before/after` 见速查表 | **练习:危险操作前暂停等人确认** → `human_in_loop.py` |
+| **7** ✅ | Human-in-the-loop | `interrupt()` 暂停 + `Command(resume=...)` 恢复(**1.x 动态写法**,需配 checkpointer);审批节点设计 | `07_hitl.py`:最小 interrupt/resume + 审批流程(批准→execute / 拒绝→cancel,条件边路由)。学到:Literal 不适合"过程填充"字段;interrupt 前别放副作用(resume 会重跑) |
 | **8** | 失败重试 + Fallback | 节点级重试 `add_node(..., retry_policy=RetryPolicy(...))`(参数名是 `retry_policy`,不是 `retry`);模型降级 `llm.with_fallbacks([backup_llm])`(Fallback 到备选模型/策略) | **练习:模拟 API 失败**,验证重试 + 切到备选 → `retry_fallback.py` |
 | **9** | 步骤日志 + 可视化 | 记录每节点的输入/输出/耗时(复用 rag-service 的 structlog 经验,JSON 输出);`graph.get_graph().draw_mermaid_png()` 生成执行流程图(`draw_mermaid()` 出 mermaid 源码) | **练习:为 Agent 加完整执行日志(JSON)+ 导出流程图** → `observability.py` |
 
