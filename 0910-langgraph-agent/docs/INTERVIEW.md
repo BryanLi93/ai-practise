@@ -1,7 +1,7 @@
 # LangGraph 学习 — 面试要点速记
 
 > 从每个 Step 的踩坑里提炼,**只收面试适用**的概念(一般性踩坑不收)。每个 Step 结束在此追加。
-> 进度:截至 **Step 8(失败重试 + Fallback)**。
+> 进度:截至 **Step 9(步骤日志 + 可视化 / 可观测)**。
 
 ---
 
@@ -98,6 +98,20 @@
 - **模型降级**:`主LLM.with_fallbacks([备选LLM])`,在 **Runnable 层、跟图无关**;主失败→拿**同样输入**调备选。用途:限流(429)/超时/5xx 切 provider、成本优化(小模型失败降级大模型)。
 - **生产怎么做 fallback**(高频追问):① **网关层**(LiteLLM/OpenRouter/Portkey)配置 fallback,应用只调一个 model 名,代码最干净、资源集中可观测——**最主流**;② 代码内 `with_fallbacks`(注意它返回 `RunnableWithFallbacks` 不是 `BaseChatModel`,传给 `create_agent` 会报类型,需压制);③ 需精细控制就手写图。
 - 来源:Step 8。
+
+### Q10　Agent 的可观测性怎么做?生产怎么追踪?(中高频)
+**一句话**:学习期可手写(装饰器记每节点输入/输出/耗时);**生产不手搓**,开 tracing 平台把每个节点/LLM/工具自动记成带父子结构的 span。
+- **可视化**:`graph.get_graph().draw_mermaid()`(出 mermaid 源码,无依赖)/ `draw_mermaid_png(output_file_path=...)`(默认联网 mermaid.ink 渲染落盘)。
+- **手写日志**:装饰器包节点函数,`time.perf_counter()` 计时 + `json.dumps`。**坑**:① state 里若是消息对象不能直接 `json.dumps`,要 `default=str`;② 装饰器**装不上 `ToolNode`**(它是 Runnable 非函数),只能盖你自己的函数节点。
+- **`functools.wraps`**:装饰器把函数换成内层 `wrapper`,被装饰函数 `__name__` 变 `"wrapper"`(所有节点都变一样,traceback 分不清);`wraps(fn)` 把原函数名/元信息抄回 wrapper。= React HOC 的 `displayName` 问题。
+- **内置观测**:`graph.stream(input, stream_mode=...)`,五选 `values`(全量 state)/`updates`(每节点的增量,最常用)/`messages`(token 流)/`custom`/`debug`(带 `task`/`task_result` 时间戳,可算精确 per-node 耗时)。**它覆盖 ToolNode 等 prebuilt 节点**,补上手写装饰器的盲区。
+- **生产 tracing(高频追问)**:① **LangSmith**(LangChain 一方,设 `LANGSMITH_TRACING`/`LANGSMITH_API_KEY` env var,零代码,自动记 trace+延迟+token+错误树);② **OpenTelemetry**(中立标准,导进 Datadog/Grafana);③ **Langfuse**(开源自托管)。
+- **structlog vs tracing(高频,要能举例)**:同一次 agent 运行——
+  - **structlog = 扁平事件流**:一条条独立 JSON 日志行(`node.start`/`llm.response`/`tool.exec`…),要自己按 `thread_id`+时间戳串起来;**结构没被记下来**。
+  - **tracing(LangSmith)= 调用树 + 自动聚合**:`agent → model → tools → model …` 嵌套成树,带每步延迟瀑布、总 token / 总成本,点开任意 span 看那步完整 prompt/响应。
+  - 一眼能答的事(树才给得了):循环跑了几轮 model、延迟全在哪步、总共花多少钱。agent 会循环嵌套,所以需要树。
+  - **类比**:structlog ≈ 散落的 `console.log` 行;tracing/LangSmith ≈ Chrome DevTools 的 **Network 瀑布 / Performance 火焰图**。两者生产并用。
+- 来源:Step 9。
 
 ## 四、工程细节(加分项,非高频)
 
