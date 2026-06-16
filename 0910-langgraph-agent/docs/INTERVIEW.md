@@ -1,7 +1,7 @@
 # LangGraph 学习 — 面试要点速记
 
 > 从每个 Step 的踩坑里提炼,**只收面试适用**的概念(一般性踩坑不收)。每个 Step 结束在此追加。
-> 进度:截至 **Step 4(工具调用)**。
+> 进度:截至 **Step 8(失败重试 + Fallback)**。
 
 ---
 
@@ -81,6 +81,23 @@
 - **版本**:1.x 主推 `interrupt()`(runtime 动态);旧 `interrupt_before`/`interrupt_after`(compile 静态)是老写法。
 - **反直觉坑**:resume 时节点**从头重跑**,`interrupt()` 之前别放副作用(发邮件/写库会重复执行);正确模式是审批节点只问、副作用放批准后的独立节点。
 - 来源:Step 7。
+
+### Q8.5　生产环境的 HITL 异步审批怎么做?(高频·进阶)
+- 核心:**interrupt 的"暂停"不是阻塞等待,而是"状态持久化 → 请求结束释放进程 → 未来独立请求恢复"**。人隔几小时/几天批准都行。
+- 两个端点:`/start`(invoke → 命中 `__interrupt__` → 存待审批表 + 返回 `thread_id`,**请求即结束**)、`/resume`(用户批准时带 `thread_id` + `Command(resume=)` → 从 checkpointer 读回状态续跑)。
+- 别混两种异步:`async/await`(`ainvoke`)是单次请求内的 IO 并发;**人类异步决策靠"持久化 + 两次独立请求",不能用 `await` 干等用户**(会占满连接)。
+- 硬要求:checkpointer 必须**持久化**(Postgres,非 InMemory)——两次请求间进程可能重启或落在不同实例。
+- 一句话:把"等人"从**进程阻塞**转化成**数据库里一条待恢复记录**,所以能扛海量待审批。
+- 来源:Step 7 延伸。
+
+### Q9　Agent 的容错怎么做?重试和 Fallback 什么区别?(中高频)
+**一句话**:两层、互补——**重试**赌"同一个再试一次就好"(瞬时抖动);**Fallback**赌"这个彻底不行,换一个"(整体不可用)。
+- **节点级重试**:`add_node(name, fn, retry_policy=RetryPolicy(max_attempts=3))`。`max_attempts` 是**总执行次数**(容忍 `n-1` 个异常,不是 n 个)。
+- **关键坑**:默认 `default_retry_on` **不重试** `ValueError`/`TypeError`/`RuntimeError` 这类——它们被当成**确定性 bug**(重试也是同样的错);只重试 `ConnectionError`/HTTP 5xx/未知异常(像瞬时故障的)。要自定义就传 `retry_on=(异常类元组)` 或 callable。
+- **重试会从节点顶部重跑** → 节点要**幂等**,副作用(写库/扣款)放可失败点之后或用幂等键。**和 HITL 的 resume 重跑是同一条规律**:重新执行的最小单位是"节点"不是"行"。
+- **模型降级**:`主LLM.with_fallbacks([备选LLM])`,在 **Runnable 层、跟图无关**;主失败→拿**同样输入**调备选。用途:限流(429)/超时/5xx 切 provider、成本优化(小模型失败降级大模型)。
+- **生产怎么做 fallback**(高频追问):① **网关层**(LiteLLM/OpenRouter/Portkey)配置 fallback,应用只调一个 model 名,代码最干净、资源集中可观测——**最主流**;② 代码内 `with_fallbacks`(注意它返回 `RunnableWithFallbacks` 不是 `BaseChatModel`,传给 `create_agent` 会报类型,需压制);③ 需精细控制就手写图。
+- 来源:Step 8。
 
 ## 四、工程细节(加分项,非高频)
 

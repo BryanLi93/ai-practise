@@ -50,7 +50,7 @@
 | Step | 主题 | 内容 | 练习 / 产出 |
 |---|---|---|---|
 | **7** ✅ | Human-in-the-loop | `interrupt()` 暂停 + `Command(resume=...)` 恢复(**1.x 动态写法**,需配 checkpointer);审批节点设计 | `07_hitl.py`:最小 interrupt/resume + 审批流程(批准→execute / 拒绝→cancel,条件边路由)。学到:Literal 不适合"过程填充"字段;interrupt 前别放副作用(resume 会重跑) |
-| **8** | 失败重试 + Fallback | 节点级重试 `add_node(..., retry_policy=RetryPolicy(...))`(参数名是 `retry_policy`,不是 `retry`);模型降级 `llm.with_fallbacks([backup_llm])`(Fallback 到备选模型/策略) | **练习:模拟 API 失败**,验证重试 + 切到备选 → `retry_fallback.py` |
+| **8** ✅ | 失败重试 + Fallback | 节点级重试 `add_node(..., retry_policy=RetryPolicy(...))`(参数名 `retry_policy`);模型降级 `主.with_fallbacks([备选])` | `08_retry.py`(节点重试)+ `09_fallback.py`(模型降级)。**两层容错**:retry=重跑同节点 / fallback=换 Runnable。踩坑:`max_attempts`=总执行次数(容忍 n-1 个异常);默认 `default_retry_on` **不重试** `ValueError`/`RuntimeError`/`TypeError` 等确定性错误,只重试 `ConnectionError`/5xx/未知异常(`retry_on` 接单类/元组/callable);重试从节点顶部**重跑**→副作用要幂等(同 HITL resume 规律);`with_fallbacks` 返回 `RunnableWithFallbacks`(非 `BaseChatModel`)→ 传给 `create_agent` 报类型(`reportCallIssue`+`reportArgumentType`),运行时能跑(对 model 调 `.bind_tools()`、`__getattr__` 代理到主+备选)但要 `# pyright: ignore`;生产 fallback 三法:**网关层**(LiteLLM/OpenRouter,最干净)/代码内压类型/手写图。顺带重构 `llm.py`:单槽单例+model 参数矛盾→**按 model 名分桶缓存**,删 `is_singleton` |
 | **9** | 步骤日志 + 可视化 | 记录每节点的输入/输出/耗时(复用 rag-service 的 structlog 经验,JSON 输出);`graph.get_graph().draw_mermaid_png()` 生成执行流程图(`draw_mermaid()` 出 mermaid 源码) | **练习:为 Agent 加完整执行日志(JSON)+ 导出流程图** → `observability.py` |
 
 ### 可选机动(我的增量,原计划没有;时间紧可后置)
