@@ -24,5 +24,5 @@ if __name__ == "__main__":
     # 但运行时对传入对象调 .bind_tools() 即可,RunnableWithFallbacks 靠代理扛得住。
     # 这里是已知的类型签名偏窄,运行时无误,精确压掉这一条。
     agent = create_agent(client, tools=[add, multiply])  # pyright: ignore[reportCallIssue, reportArgumentType]
-    result = agent.invoke({ "messages": [HumanMessage("3加5的结果乘以3等于多少?")] })
-    print(result["messages"][-1].content)
+    for chunk in agent.stream({ "messages": [HumanMessage("3加5的结果乘以3等于多少?")] }, stream_mode="updates"):
+        print(chunk)
