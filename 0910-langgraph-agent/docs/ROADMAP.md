@@ -57,7 +57,7 @@
 
 | Step | 主题 | 内容 | 产出 |
 |---|---|---|---|
-| **10**(建议保留) | 收官:RAG-as-tool | 把 rag-service 的检索封成一个 `@tool`,让 agent 自己决定何时检索 —— 串起整个课程(Agent 调 RAG) | `rag_agent.py` |
+| **10** ✅ | 收官:RAG-as-tool | 把 rag-service 的检索封成一个 `@tool`,让 agent 自己决定何时检索 —— 串起整个课程(Agent 调 RAG) | `11_demo_rag_agent.py`:`@tool search_knowledge_base` 调 rag-service `POST /query`,**只取 `sources`、丢弃 `answer`**(`/query` 把 retrieve+generate 捆死,生成那步 gpt-5.4 经中转站慢/漏 `<think>`/偶回"没找到";检索 sources 又快又准)→ `create_agent` 挂工具。**学习点验收**:同一 agent,算术题 `tool_calls=[]` 直接答、知识库题调 `search_knowledge_base` 再综合 → 检索从"必走流程"变"按需调用"。看 stream:`stream_mode="updates"` 每 chunk=`{节点:{messages}}`;自写 `show_update` 能截断长 chunk / 内置 `msg.pretty_print()` 一行出框线(不截断)。踩坑:rag-service redis 在 **6380**(容器避让本机 6379)是对的,报 `6380 refused` 是没起 redis 容器、别改端口 |
 | **11**(可选) | 流式输出 | `astream(stream_mode=...)`:`values`/`updates`/`messages`。对照 rag-service 的 SSE token 流 | `streaming.py` |
 | **12**(可选) | 多 Agent / 子图 | `subgraph` 或 supervisor 模式:最简多 agent handoff | `multi_agent.py` |
 
