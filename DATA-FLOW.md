@@ -2,8 +2,6 @@
 
 > 这份笔记串起仓库里三个互相调用的项目,讲清**一个问题的数据格式从后端到屏幕经历了什么变化**,以及 **RAG 模式和 Agent 模式的本质区别**。
 > 单个项目内部的细节各自有文档(如 `1112-frontend/docs/ARCHITECTURE.md`),这里只画跨项目的全景。
->
-> 📌 2026-06-24:前端**弃用 Vercel AI SDK**,BFF 从「翻译适配器」改成「**原样透传代理**」,客户端直接读后端的自定义 SSE。下文已按新架构描述(旧版多一层 AI SDK 协议翻译,已删)。
 
 ---
 
@@ -87,11 +85,11 @@ data: {"type":"token","content":"支持 L2、内积、余弦距离。"}
 data: {"type":"done"}
 ```
 
-⬇ **Next.js BFF 原样透传(不翻译)**:`return new Response(upstream.body, …)`
+⬇ **Next.js BFF 原样透传**:`return new Response(upstream.body, …)`
 
 ### ④ Next.js BFF :3000 `/api/agent` —— 和 ③ 逐字节相同
 
-BFF 只做安全收口(藏后端地址)+ 错误兜底(后端没起返干净 502),**SSE 帧原样转给浏览器**。所以这一跳数据 = ③,不再有「AI SDK 流」这种中间格式。
+BFF 只做安全收口(藏后端地址)+ 错误兜底(后端没起返干净 502),SSE 帧原样转给浏览器。所以这一跳数据 = ③。
 
 ⬇ **客户端 `parseSSE` 逐帧解出 → `agentReduce(frame, draft)` 累积进一条扁平消息**
 
@@ -106,7 +104,7 @@ BFF 只做安全收口(藏后端地址)+ 错误兜底(后端没起返干净 502)
 // RAG 模式则是 { text, sources: [完整 Source[]], conversationId }
 ```
 
-> 对比旧版:以前这里是 AI SDK 的 `message.parts[]`(有序部件数组,需 `useChat` 解协议拼出)。现在是一条字段扁平的 `ChatMessage`,`text` / `toolSteps` / `sources` 各占一个字段,reducer 直接往上累积,渲染端直接取字段。
+每种信息各占一个字段,reducer 直接往上累积,渲染端直接取字段。
 
 ---
 
@@ -132,7 +130,7 @@ RAG :8000 /query/stream            Next.js /api/chat(透传)          client
 
 两条链格式经历的**本质变化是同一套**:
 
-> **结构化 JSON / 帧 → 自定义语义帧(SSE)→(BFF 原样透传)→ 客户端 reducer 累积成扁平 ChatMessage**
+> **结构化 JSON / 帧 → 自定义语义帧(SSE)→ BFF 原样透传 → 客户端 reducer 累积成扁平 ChatMessage**
 
 唯一的岔口在 **Agent 多了一步「sources 拍平成字符串」**——它决定了两个模式前端能力的全部差异(有没有 `[n]` 溯源)。
 
