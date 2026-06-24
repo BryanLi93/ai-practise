@@ -9,3 +9,8 @@ python-dotenv
 # 配置校验(rag-service 也用,后面定义 Settings 会用到)
 pydantic-settings
 python-dotenv
+# 把 agent 包成 HTTP/SSE 服务,给 1112-frontend 消费(15_agent_server.py)
+fastapi
+uvicorn[standard]
+# agent 工具里同步调 RAG /query
+requests
