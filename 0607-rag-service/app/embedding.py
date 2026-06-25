@@ -20,10 +20,10 @@ logger = logging.getLogger(__name__)
 
 # ---------- 常量 ----------
 
-# 单次请求最多 100 条文本(OpenAI embeddings 上限是 2048,这里保守起步,够用且好观察)
-BATCH_SIZE = 100
+# 单次请求最多 32 条文本(SiliconFlow embeddings 硬上限就是 32 条/请求)
+BATCH_SIZE = 32
 
-# 批之间主动节流。OpenAI/中转站限流远比 Gemini free tier 宽松,给 0.5 秒留点余量即可;
+# 批之间主动节流。SiliconFlow 限流比 Gemini free tier 宽松,给 0.5 秒留点余量即可;
 # 撞限流主要靠下面的 tenacity 退避兜底,不靠这里硬等。
 THROTTLE_SECONDS = 0.5
 
@@ -35,7 +35,7 @@ async def _embed_batch_once(texts: list[str]) -> list[list[float]]:
     resp = await client.embeddings.create(
         model=settings.embedding_model,
         input=texts,
-        dimensions=settings.embedding_dim,  # 1536:小模型即原生维度,大模型截断(MRL)
+        # bge-m3 固定输出 1024 维;SiliconFlow 的 dimensions 参数只对 Qwen3 系列生效,这里不传
     )
     # OpenAI 按 index 返回,排序确保和输入顺序一一对应
     data = sorted(resp.data, key=lambda d: d.index)

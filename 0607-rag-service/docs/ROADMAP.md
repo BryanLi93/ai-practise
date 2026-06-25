@@ -15,8 +15,8 @@
 
 ## 可写的技术博客选题(Week 23 用)
 
-- pgvector 维度上限 / HALFVEC workaround(3072→1536 的来龙去脉)
-- 从 Gemini 原生 SDK 迁到 OpenAI 兼容中转站:动机(断连)、对称 vs 非对称 embedding(task_type)、以及"换 embedding 模型必须清库重灌向量"的契约坑
+- pgvector 维度上限 / HALFVEC workaround(2000 维上限、halfvec 提到 4000、bge-m3 固定 1024)
+- 用 OpenAI 兼容接口接入硅基流动:兼容层的好处(换 provider/模型只改 .env)、对称 vs 非对称 embedding(task_type / query-passage)、以及"换 embedding 模型必须清库重灌向量"的契约坑
 - 中文文本用 RecursiveCharacterTextSplitter 的坑(需显式中文标点分隔符)
 - 前端工程师如何构建生产级 RAG 系统(综述向)
 - RRF vs 加权求和:为什么混合检索用排名而非分数

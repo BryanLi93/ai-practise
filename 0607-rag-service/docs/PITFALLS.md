@@ -82,7 +82,7 @@
 
 - **现象**:`httpcore.ConnectError`,traceback 里出现 `http_proxy.py ... start_tls`。
 - **原因**:本地代理(`127.0.0.1:7897`)那一刻不可用。中国大陆访问 Gemini 必须走代理,代理一断,所有 LLM/embedding 调用都连不上。
-- **更新(已迁移)**:正因为 Gemini 直连要代理且常断连,后来整体切到 **OpenAI 兼容中转站**(国内可直连),LLM/embedding 不再依赖这个代理,这类 `ConnectError` 基本消失。此条作为历史排查记录保留。
+- **更新(已迁移)**:正因为 Gemini 直连要代理且常断连,后来整体切到 **硅基流动(SiliconFlow)OpenAI 兼容接口**(国内可直连),LLM/embedding 不再依赖这个代理,这类 `ConnectError` 基本消失。此条作为历史排查记录保留。
 - **排查**:
   ```bash
   nc -z 127.0.0.1 7897        # 端口在不在
@@ -117,7 +117,7 @@
 ### P11. 流式 chunk 的 token 在 `delta.content`,且首尾/usage 帧会是空
 
 - **现象**:照搬非流式的 `response.choices[0].message.content` 读不到流式 token;或对某些 chunk 直接 `TypeError`。
-- **原因**:`stream=True` 时每个 chunk 的增量在 `choices[0].delta.content`(不是 `message.content`)。而首帧(只带 role)、尾帧、部分中转站的 usage 统计帧,`content` 是 `None` 或 `choices` 为空数组。
+- **原因**:`stream=True` 时每个 chunk 的增量在 `choices[0].delta.content`(不是 `message.content`)。而首帧(只带 role)、尾帧、部分 provider(含硅基流动)的 usage 统计帧,`content` 是 `None` 或 `choices` 为空数组。
 - **正解**:
   ```python
   async for chunk in stream:

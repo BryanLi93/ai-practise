@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-import asyncio
 import re
 from collections.abc import AsyncGenerator
 
@@ -272,9 +271,9 @@ async def _rerank_chunks(
     if not candidates:
         return []
     
-    # 在线程池里跑同步推理,不阻塞事件循环
+    # 走 SiliconFlow /v1/rerank(异步网络调用,直接 await)
     docs = [rc.chunk.content for rc in candidates]
-    scores = await asyncio.to_thread(do_rerank, question, docs)
+    scores = await do_rerank(question, docs)
 
     # 用 rerank 分数排序
     for rc, score in zip(candidates, scores):
@@ -318,6 +317,8 @@ async def _generate_answer(question: str, context: str, recent_messages: list[Me
         ],
         temperature=0.1,
         max_tokens=1024,
+        # Qwen3.5 是思考模型,RAG 答案生成不需要思考链(否则 token 全耗在 reasoning 上、content 为空)
+        extra_body={"enable_thinking": False},
     )
     _record_token_usage(response.usage)
 
@@ -342,6 +343,7 @@ async def _generate_answer_stream(question: str, context: str, recent_messages: 
         max_tokens=1024,
         stream=True,
         stream_options={"include_usage": True},  # 让最后一帧带 token 用量
+        extra_body={"enable_thinking": False},   # Qwen3.5 思考模型,生成不需要思考链
     )
 
     async for chunk in stream:

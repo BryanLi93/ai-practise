@@ -38,10 +38,10 @@
 |---|---|---|---|
 | **1** ✅ | 最小图 | `State`(TypedDict)/ 节点 / 边 / reducer(`Annotated[list, operator.add]`)/ `compile` / `invoke` | **练习:两节点直线图,逐字追踪 reducer 累加**(用户自写,已跑通)→ `01_graph.py` |
 | **2** ✅ | 条件分支 + START/END | `add_conditional_edges`:路由函数读 state 决定走哪条边;`START`/`END` 锚点 | **练习:带分支的"问题 → 思考 → 回答"**(判类型:闲聊→chat / 含数字→calc)。用户自写,已跑通;用了 `Literal` 注解约束标签,判断放 route 直读 query → `02_conditional.py` |
-| **3** ✅ | 接 LLM 节点 + 多轮 | `ChatOpenAI` 接中转站(复用 rag-service 的 `.env`);`MessagesState` + `add_messages` | 全部完成:`llm.py` 单例封装(SecretStr)+ `02_conditional.py` 的 `node_chat` 接真 LLM;`03_chatbot.py` 用 `MessagesState` 做多轮,亲手验证"带历史 vs 不带历史"——LLM 无状态,记忆靠每轮传历史 |
+| **3** ✅ | 接 LLM 节点 + 多轮 | `ChatOpenAI` 接硅基流动(复用 rag-service 的 `.env`);`MessagesState` + `add_messages` | 全部完成:`llm.py` 单例封装(SecretStr)+ `02_conditional.py` 的 `node_chat` 接真 LLM;`03_chatbot.py` 用 `MessagesState` 做多轮,亲手验证"带历史 vs 不带历史"——LLM 无状态,记忆靠每轮传历史 |
 | **4** ✅ | 工具调用 | `@tool` → `bind_tools` → 观察 `tool_calls`;`ToolNode`(必须在图里跑)执行工具。**Agent vs 多轮对话的分水岭** | `04_tools.py`(看 tool_calls)+ `04_tool_agent.py`(LLM→ToolNode→LLM 一次往返,线性版)。踩了死循环坑(回头边)+ 学了 `print_ascii()`/`draw_mermaid()` 可视化。条件路由的循环版留 Step 5 |
 | **5** ✅ | Agent loop | 手写 `LLM ⇄ ToolNode` 循环(`should_continue` 条件边判断有无 tool_call);再用 `create_agent`(`langchain.agents`,1.0)一行替换,对比 | `05_agent_loop.py`:add+multiply 双工具,链式问题逼出循环 2 轮;手写版与 `create_agent` 内部图同构(`model ⇄ tools`+条件边)、结果一致。学了 `isinstance` 类型收窄 |
-| **6** ✅ | 持久化 Checkpointer | `InMemorySaver`(免装)验证自动记忆 + `thread_id` 会话隔离;再换 `SqliteSaver`(装 `langgraph-checkpoint-sqlite`)落盘、**重启不丢** | `06_checkpoint.py`:同 thread_id 只传新消息也记得、换 thread_id 隔离;SqliteSaver 跨进程持久化已验证(全新进程读 db 仍答出"小明")。撞上中转站偶发返回非标准格式→引出 Step 8 重试 |
+| **6** ✅ | 持久化 Checkpointer | `InMemorySaver`(免装)验证自动记忆 + `thread_id` 会话隔离;再换 `SqliteSaver`(装 `langgraph-checkpoint-sqlite`)落盘、**重启不丢** | `06_checkpoint.py`:同 thread_id 只传新消息也记得、换 thread_id 隔离;SqliteSaver 跨进程持久化已验证(全新进程读 db 仍答出"小明")。撞上硅基流动偶发返回非标准格式→引出 Step 8 重试 |
 
 ## Week 10 — 人类介入 / 容错 / 可观测(截止 📅 2026-06-18)
 
@@ -57,7 +57,7 @@
 
 | Step | 主题 | 内容 | 产出 |
 |---|---|---|---|
-| **10** ✅ | 收官:RAG-as-tool | 把 rag-service 的检索封成一个 `@tool`,让 agent 自己决定何时检索 —— 串起整个课程(Agent 调 RAG) | `11_demo_rag_agent.py`:`@tool search_knowledge_base` 调 rag-service `POST /query`,**只取 `sources`、丢弃 `answer`**(`/query` 把 retrieve+generate 捆死,生成那步 gpt-5.4 经中转站慢/漏 `<think>`/偶回"没找到";检索 sources 又快又准)→ `create_agent` 挂工具。**学习点验收**:同一 agent,算术题 `tool_calls=[]` 直接答、知识库题调 `search_knowledge_base` 再综合 → 检索从"必走流程"变"按需调用"。看 stream:`stream_mode="updates"` 每 chunk=`{节点:{messages}}`;自写 `show_update` 能截断长 chunk / 内置 `msg.pretty_print()` 一行出框线(不截断)。踩坑:rag-service redis 在 **6380**(容器避让本机 6379)是对的,报 `6380 refused` 是没起 redis 容器、别改端口 |
+| **10** ✅ | 收官:RAG-as-tool | 把 rag-service 的检索封成一个 `@tool`,让 agent 自己决定何时检索 —— 串起整个课程(Agent 调 RAG) | `11_demo_rag_agent.py`:`@tool search_knowledge_base` 调 rag-service `POST /query`,**只取 `sources`、丢弃 `answer`**(`/query` 把 retrieve+generate 捆死,生成那步 Qwen3.5-4B 经硅基流动慢/带思考链/偶回"没找到";检索 sources 又快又准)→ `create_agent` 挂工具。**学习点验收**:同一 agent,算术题 `tool_calls=[]` 直接答、知识库题调 `search_knowledge_base` 再综合 → 检索从"必走流程"变"按需调用"。看 stream:`stream_mode="updates"` 每 chunk=`{节点:{messages}}`;自写 `show_update` 能截断长 chunk / 内置 `msg.pretty_print()` 一行出框线(不截断)。踩坑:rag-service redis 在 **6380**(容器避让本机 6379)是对的,报 `6380 refused` 是没起 redis 容器、别改端口 |
 | **11** ✅ | 流式输出 | `astream(stream_mode=...)`:`values`/`updates`/`messages`。对照 rag-service 的 SSE token 流 | `12_streaming_by_claude.py`。**两种粒度**:`messages`=逐 token(打字机)/ `updates`=整段(节点跑完才给一块)。messages 的 chunk 是二元组 `(AIMessageChunk, metadata)`,过滤掉空块/非 AI 块;打字机靠 `print(content, end="", flush=True)`。**astream vs stream**:数据完全一样,只差同步/异步——`astream` 是异步生成器(`async for`+`asyncio.run()`)。脚本自己跑 sync `stream` 够用,只有做高并发 SSE 服务才必须 async(对照 rag-service 的 FastAPI) |
 | **12** ✅ | 多 Agent / 子图 | `subgraph` 或 supervisor 模式:最简多 agent handoff | `13_multi_agent_by_claude.py`。**核心:agent 就是张编译好的图,图能当节点**——`add_node("tech_agent", tech_agent)` 直接塞编译好的 agent(不是函数),一个节点内部跑完自己的 `model⇄tool` 循环。结构同 Step 2 条件分支,只是分支终点从函数换成 agent、路由从关键字换成 supervisor 的 LLM 判断(写进 `state["next"]`,条件边读它)。能插进去靠 **state 形状对上**:agent 吃/吐 `{"messages"}`,大图用 `MessagesState` 就严丝合缝。验证:算术题→general_agent 直答 / 知识库题→tech_agent 调 RAG |
 

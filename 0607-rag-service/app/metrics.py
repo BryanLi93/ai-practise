@@ -44,15 +44,15 @@ RETRIEVAL_CANDIDATES = Histogram(
 
 RERANK_SCORE = Histogram(
     "rag_rerank_score",
-    "rerank cross-encoder 打分分布",
-    buckets=(-10, -5, -2, 0, 2, 5, 10),  # bge-reranker logits 大致范围
+    "rerank 相关性打分分布",
+    buckets=(0, 0.2, 0.4, 0.6, 0.8, 0.9, 1.0),  # SiliconFlow rerank 返回 0-1 归一化分
 )
 
 # ---------- 成本(token × 单价)----------
-# 单价 = 每 1K token 的价格。⚠️ 占位示例,务必改成你中转站的实际计费(单位看你中转站:元/美元)。
+# 单价 = 每 1K token 的价格(单位:元 RMB)。⚠️ 占位示例,务必按硅基流动实际计费核对。
 MODEL_PRICES: dict[str, dict[str, float]] = {
-    "gpt-5.4": {"prompt": 0.002, "completion": 0.008},            # ← 改成实际单价 / 1K token
-    "text-embedding-3-small": {"prompt": 0.00002, "completion": 0.0},
+    "Qwen/Qwen3.5-4B": {"prompt": 0.0, "completion": 0.0},        # ← 占位,按实际单价 / 1K token 改
+    "BAAI/bge-m3": {"prompt": 0.0, "completion": 0.0},            # ← 占位,按实际单价 / 1K token 改
 }
 
 LLM_COST = Counter(

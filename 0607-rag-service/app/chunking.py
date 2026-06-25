@@ -16,7 +16,7 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 # chunk_size 单位是字符数,不是 token 数
 # 中文一个字 ~1.5 token,英文 ~0.25 token,500 字符大约 100-700 tokens
-# 起步值偏保守,远低于 text-embedding-3-small 的 8191 token 上限
+# 起步值偏保守,远低于 bge-m3 的 8192 token 上限
 CHUNK_SIZE = 500
 CHUNK_OVERLAP = 50
 
@@ -47,7 +47,7 @@ class Chunk:
 _encoder = tiktoken.get_encoding("cl100k_base")
 
 def estimate_tokens(text: str) -> int:
-    """估算 token 数。用 cl100k_base 编码,对 gpt-5.4 / text-embedding-3 来说是近似值。"""
+    """估算 token 数。用 cl100k_base 编码,对 Qwen3.5 / bge-m3 来说是近似值。"""
     return len(_encoder.encode(text))
 
 # ---------- 核心 API ----------

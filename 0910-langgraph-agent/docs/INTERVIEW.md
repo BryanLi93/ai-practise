@@ -115,7 +115,7 @@
 
 ## 四、工程细节(加分项,非高频)
 
-- **接 OpenAI 兼容中转站**:`ChatOpenAI` 不传 `api_key`/`base_url` 也能用——`OPENAI_API_KEY`/`OPENAI_BASE_URL` 是 langchain / openai SDK 源码里写死的标准环境变量名,会自动读取(同 rag-service 的中转站方案)。
+- **接硅基流动(SiliconFlow)OpenAI 兼容接口**:`ChatOpenAI` 不传 `api_key`/`base_url` 也能用——`OPENAI_API_KEY`/`OPENAI_BASE_URL` 是 langchain / openai SDK 源码里写死的标准环境变量名,会自动读取(同 rag-service 的方案)。
 - **LangGraph 1.0 版本变更**(2025-10 GA):造 agent 用 `langchain.agents.create_agent`(旧 `langgraph.prebuilt.create_react_agent` 已弃用);人类介入用 `interrupt()` + `Command(resume=)`(旧 `interrupt_before/after`);checkpointer 拆成独立包。
 - 来源:环境搭建 / Step 3。
 

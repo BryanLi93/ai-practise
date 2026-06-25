@@ -36,8 +36,8 @@ graph TD
 
     subgraph Infra["基础设施"]
         PG[(PostgreSQL 16<br/>pgvector + zhparser)]
-        Gemini[LLM 中转站<br/>OpenAI 兼容 · gpt-5.4 / text-embedding-3-small]
-        BGE[BGE-reranker-v2-m3<br/>本地模型]
+        Gemini[硅基流动 SiliconFlow<br/>OpenAI 兼容 · Qwen3.5-4B / bge-m3]
+        BGE[BGE-reranker-v2-m3<br/>经硅基流动 /v1/rerank]
     end
 
     Client --> FastAPI --> Upload & Query
@@ -62,7 +62,7 @@ sequenceDiagram
     participant I as ingest.py
     participant C as chunking.py
     participant E as embedding.py
-    participant G as LLM 中转站
+    participant G as 硅基流动
     participant DB as PostgreSQL
 
     U->>R: POST /upload (file)
@@ -79,8 +79,8 @@ sequenceDiagram
     I->>C: split_text(content)
     C-->>I: List[Chunk] (500字符/块, 50重叠)
     I->>E: embed_documents(texts)
-    loop 每批 100 条
-        E->>G: embeddings.create(model=text-embedding-3-small, dimensions=1536)
+    loop 每批 ≤32 条
+        E->>G: embeddings.create(model=bge-m3)
         G-->>E: embeddings
         E->>E: sleep 0.5s 主动节流 (除最后一批)
     end
@@ -101,15 +101,15 @@ sequenceDiagram
     participant R as query.py
     participant S as retrieval.py
     participant E as embedding.py
-    participant G as LLM 中转站
+    participant G as 硅基流动
     participant DB as PostgreSQL
-    participant K as rerank.py / BGE
+    participant K as rerank.py / 硅基流动 rerank
 
     U->>R: POST /query (question, top_k)
     R->>S: run_query(question, top_k)
 
     S->>E: embed_query(question)
-    E->>G: embeddings.create(model=text-embedding-3-small)
+    E->>G: embeddings.create(model=bge-m3)
     G-->>E: query_vector
     E-->>S: query_vector
 
@@ -125,7 +125,7 @@ sequenceDiagram
     end
 
     alt ENABLE_RERANK = True
-        S->>K: rerank(question, docs)  [asyncio.to_thread]
+        S->>K: rerank(question, docs)  [await /v1/rerank]
         K-->>S: scores → 重排取 top_k
     else 当前默认 False
         S->>S: candidates[:top_k] 直接截断

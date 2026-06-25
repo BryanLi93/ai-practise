@@ -48,18 +48,18 @@
 | 校验/序列化 | Pydantic v2 + pydantic-settings | |
 | DB 驱动 | psycopg v3 | `psycopg[binary]`,原生 async |
 | 数据库 | PostgreSQL 16 | Docker,端口 **5433**(避开 ai_registry 项目的 5432) |
-| 向量扩展 | pgvector | `halfvec(1536)` + HNSW 索引 |
+| 向量扩展 | pgvector | `halfvec(1024)` + HNSW 索引 |
 | 中文分词 | zhparser(基于 SCWS) | 自编译进 pgvector 镜像 |
-| Embedding | OpenAI `text-embedding-3-small` | 1536 维(原生);经 OpenAI 兼容中转站 |
-| Chat | `gpt-5.4` | 经 OpenAI 兼容中转站 |
-| LLM SDK | `openai`(AsyncOpenAI) | chat + embedding 都走中转站(自定义 `base_url`) |
-| Rerank | `BAAI/bge-reranker-v2-m3` | 经 `sentence-transformers` 加载,本地推理 |
+| Embedding | `BAAI/bge-m3` | 1024 维(固定,无 dimensions 参数);经硅基流动(SiliconFlow) |
+| Chat | `Qwen/Qwen3.5-4B` | 思考模型,生成/改写时 `enable_thinking=False`;经硅基流动 |
+| LLM SDK | `openai`(AsyncOpenAI) | chat + embedding 都走硅基流动(自定义 `base_url`) |
+| Rerank | `BAAI/bge-reranker-v2-m3` | 经硅基流动 `/v1/rerank` API(httpx 裸调,非本地推理) |
 | 限流重试 | `tenacity` | 指数退避 |
 | 日志 | `structlog` | 结构化 JSON 管道 + 桥接 stdlib;contextvars 注入 trace_id |
 | 监控 | `prometheus-client` | Counter/Histogram + `/metrics` 端点(pull 模型);含 token/延迟/成本 |
 | 缓存 | `redis`(`redis.asyncio`) | embedding + 首轮答案缓存,best-effort 降级;host 6380→容器 6379 |
 | 分块 | `langchain-text-splitters` | RecursiveCharacterTextSplitter |
-| token 估算 | `tiktoken` | cl100k_base(对 gpt-5.4 是近似值) |
+| token 估算 | `tiktoken` | cl100k_base(对 Qwen3.5 是近似值) |
 | PDF 解析 | `pymupdf`(fitz) | |
 | 容器 | Docker Compose + OrbStack | |
 
@@ -68,7 +68,8 @@
 - pip 用清华镜像:`pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple`
 - HuggingFace 模型下载用国内镜像:`.env` 里设 `HF_ENDPOINT=https://hf-mirror.com`
 - 两个 Postgres 实例:`ai_registry` 项目在 5432,本 RAG 项目在 5433
-- chat + embedding 都走 **OpenAI 兼容中转站**:`.env` 配 `OPENAI_API_KEY` + `OPENAI_BASE_URL`(通常以 `/v1` 结尾);限流取决于中转站,远比原 Gemini free tier 宽松
+- chat / embedding / rerank 都走 **硅基流动(SiliconFlow)OpenAI 兼容接口**:`.env` 配 `OPENAI_API_KEY` + `OPENAI_BASE_URL`(`https://api.siliconflow.cn/v1`)+ `CHAT_MODEL` / `EMBEDDING_MODEL` / `RERANK_MODEL`;限流比原 Gemini free tier 宽松
+- ⚠️ **Qwen3.5-4B 是思考模型**:默认会先输出一大段 `reasoning_content` 再给 `content`,在有 `max_tokens` 上限的 RAG 生成里会把额度耗光导致 `content` 为空。chat 三处调用(生成/流式生成/查询改写)都传 `extra_body={"enable_thinking": False}` 关掉思考
 - 改 `.env` 后**必须手动重启服务**:`settings = Settings()` 进程启动只读一次,reload 只监听 `.py` 不监听 `.env`(踩过坑)
 - ⚠️ 换 embedding 模型 = 旧向量作废,**必须清库重新入库**(向量跨模型不可比)
 
@@ -78,10 +79,10 @@
 
 > 完整理由在 `docs/DECISIONS.md`(项目核心知识点 + 面试考点)。这里只列标题,用到某条按编号去查。
 
-- **向量与存储**:1 维度 1536(text-embedding-3-small 原生;-3-large 才 MRL 截断)/ 2 halfvec 而非 vector / 3 维度是数据库的契约
-- **Embedding 调用**:4 ~~必须用 google-genai 原生~~→已迁移 OpenAI 兼容中转站(见 41)/ 5 ~~Asymmetric task_type~~→OpenAI 对称无 task_type(概念仍是考点)/ 6 限流处理(批量+节流 0.5s+退避)/ 7 阻塞调用 await、ML 推理用 asyncio.to_thread
-- **Provider 迁移**:41 Gemini 原生 → OpenAI 兼容中转站(chat=gpt-5.4 / embedding=text-embedding-3-small,统一 openai SDK)
-- **检索(三段式)**:8 pgvector 而非 ChromaDB / 9 tsvector+GIN 而非 rank_bm25 / 10 中文分词 zhparser / 11 content_tsv 用 Generated Column / 12 OR 风格+ts_rank_cd / 13 RRF 而非加权求和 / 14 召回候选=top_k×4 / 15 三段式架构 / 16 Rerank 用 BGE 本地而非 Cohere / 17 Bi-encoder vs Cross-encoder / 18 三个常量的漏斗
+- **向量与存储**:1 维度 1024(bge-m3 固定输出,无 MRL / dimensions 参数)/ 2 halfvec 而非 vector / 3 维度是数据库的契约
+- **Embedding 调用**:4 用硅基流动 OpenAI 兼容接口(见 41)/ 5 bge-m3 当前对称使用,未加 query/passage 前缀(对称 vs 非对称仍是考点)/ 6 限流处理(批量 ≤32+节流 0.5s+退避)/ 7 chat/embedding 阻塞调用 await;rerank 改走 API 后是异步网络调用直接 await(不再 asyncio.to_thread)
+- **Provider**:41 走硅基流动 OpenAI 兼容接口(chat=Qwen/Qwen3.5-4B / embedding=BAAI/bge-m3 / rerank=BAAI/bge-reranker-v2-m3;chat+embedding 用 openai SDK,rerank 用 httpx)
+- **检索(三段式)**:8 pgvector 而非 ChromaDB / 9 tsvector+GIN 而非 rank_bm25 / 10 中文分词 zhparser / 11 content_tsv 用 Generated Column / 12 OR 风格+ts_rank_cd / 13 RRF 而非加权求和 / 14 召回候选=top_k×4 / 15 三段式架构 / 16 Rerank 用 BGE(经 SiliconFlow /v1/rerank API)而非 Cohere / 17 Bi-encoder vs Cross-encoder / 18 三个常量的漏斗
 - **生成**:19 system_instruction 参数 / 20 temperature=0.1 / 21 强 prompt+few-shot / 22 chunks 用 `---` 分隔
 - **引用溯源**:23 `[n]`+sources 数组 / 24 难点是引用正确性(faithfulness)
 - **多轮对话**:25 服务端持有历史 / 26 Conversation UUID、Message int / 27 按 id 排序不按 created_at / 28 sources_json 用 JSONB / 29 存取闭环 / 30 Query Rewriting(Day 2 已完成)/ 31 历史滑动窗口 / 39 检索用改写句·生成用原话 / 40 写库放 RAG 之后·单事务
@@ -109,11 +110,11 @@
 │   ├── db.py                    # async engine + AsyncSessionLocal + get_db 依赖
 │   ├── models.py                # Document, Chunk, Conversation, Message(4 张表都已建)
 │   ├── schemas.py               # 所有 Pydantic 请求/响应模型
-│   ├── llm.py                   # get_openai_client():AsyncOpenAI 单例(中转站,chat+embedding 共用)
-│   ├── embedding.py             # OpenAI embedding 封装(批量+节流+重试,无 task_type)
+│   ├── llm.py                   # get_openai_client():AsyncOpenAI 单例(硅基流动,chat+embedding 共用)
+│   ├── embedding.py             # bge-m3 embedding 封装(批量 ≤32+节流+重试)
 │   ├── chunking.py              # RecursiveCharacterTextSplitter + token 估算
 │   ├── parsing.py               # 文件解析层(PDF / txt / md → str)
-│   ├── rerank.py                # BGE-reranker 加载与打分(CrossEncoder)
+│   ├── rerank.py                # 调硅基流动 /v1/rerank 打分(httpx,按输入顺序对齐分数)
 │   ├── routers/
 │   │   ├── upload.py            # POST /upload
 │   │   ├── query.py            # POST /query(已接入 conversation)
@@ -141,7 +142,7 @@
 
 ### 数据模型概要
 - `documents`(id, filename, content_type, byte_size, created_at)→ 1:N → `chunks`
-- `chunks`(id, document_id FK CASCADE, chunk_index, content, token_count, embedding HALFVEC(1536), content_tsv GENERATED)
+- `chunks`(id, document_id FK CASCADE, chunk_index, content, token_count, embedding HALFVEC(1024), content_tsv GENERATED)
 - `conversations`(id UUID, title, created_at)→ 1:N → `messages`
 - `messages`(id int, conversation_id FK CASCADE, role, content, sources_json JSONB, created_at)
 
@@ -158,7 +159,7 @@
 - Step 1-12:项目骨架、Postgres+pgvector、数据模型、embedding 模块、分块、schemas、ingest、upload、retrieval、query、main.py、端到端验证
 - Day 3:引用溯源(`[n]` + sources)
 - Day 4:混合检索(向量 + tsvector/zhparser + RRF)
-- Day 5:Rerank 层(BGE-reranker-v2-m3,asyncio.to_thread)
+- Day 5:Rerank 层(BGE-reranker-v2-m3,经硅基流动 /v1/rerank API)
 - Day 6-7:PDF 解析(pymupdf + 启发式去页眉页脚)、README、Docker、git
 
 ### Week 7 — 多轮对话 + 工程化(进行中)
@@ -183,7 +184,7 @@
   - 内置极简 Markdown 渲染器(不依赖 CDN);答案 `[n]` 可点击联动右侧来源高亮
   - `app/main.py` 用 `StaticFiles(html=True)` 把 `web/` 挂到 `/ui`(与 API 同源,无 CORS);访问 `http://127.0.0.1:8000/ui/`
   - "新对话"只清前端状态,服务端在首次 `/query` 才建会话(复用 Day 2 单事务,不留空会话)
-- **Provider 迁移(Day 4 前插入)— 已完成**:Gemini 原生 SDK 老断连,chat + embedding 全面切到 **OpenAI 兼容中转站**(`app/llm.py` 的 `get_openai_client()` 单例;chat=`gpt-5.4`,embedding=`text-embedding-3-small`,均 .env 配)。换 embedding 模型已清库重灌。
+- **Provider(走硅基流动)— 已完成**:chat / embedding / rerank 全部走 **硅基流动(SiliconFlow)OpenAI 兼容接口**(`app/llm.py` 的 `get_openai_client()` 单例供 chat+embedding;rerank 走 `app/rerank.py` 的 httpx 调 `/v1/rerank`)。chat=`Qwen/Qwen3.5-4B`(思考模型,三处调用均 `enable_thinking=False`)、embedding=`BAAI/bge-m3`(1024 维)、rerank=`BAAI/bge-reranker-v2-m3`,均 .env 配。换 embedding 模型已清库重灌。
 - **Day 4(流式输出)— 已完成**:
   - `services/retrieval.py`:`query()` 拆成 `retrieve()`(只检索)+ `generate_stream()`(只流式生成);`_generate_answer_stream` 用 `chat.completions.create(stream=True)` 逐 token `yield`(guard `choices` 空帧 / `delta.content` 为 None);`_build_user_prompt` 抽出供流式/非流式共用。
   - `services/chat.py`:抽 `_prepare`(会话+历史+改写)/ `_build_sources` / `_persist`(单事务写库)三个共用件;`handle_chat`(非流式,保留 `run_query`)与 `handle_chat_stream`(流式,产出语义帧 dict)各走各的生成,**未强行合并**(讨论后定:非流式不绕道流式)。
@@ -204,7 +205,7 @@
   - 验证:`generate_latest()` 快照见全部 5 个指标(Histogram 分桶 + _count/_sum 正确)。
   - ⚠️ **取舍**:`rag_rerank_score` 因 `ENABLE_RERANK=False` 暂无数据;`rewrite_query` 的 token 未计入(只统计主生成);未接真实 Prometheus/Grafana,本地 `curl /metrics` 验证为准。
 - **Day 7(Docker 整合)— 已完成**(提交 `1bed96a`):
-  - 新增根目录 `Dockerfile`(app 镜像,`python:3.12-slim`):先单独装 CPU-only torch(官方 CPU 源,避开 ~4GB CUDA 库)→ 装 `libgomp1`(torch 运行时依赖 OpenMP)→ 依赖层与代码层分离复用缓存;`tiktoken` 的 cl100k_base 词表烤进镜像(`TIKTOKEN_CACHE_DIR`,运行时容器内常下载失败)。
+  - 新增根目录 `Dockerfile`(app 镜像,`python:3.12-slim`):依赖层与代码层分离复用缓存;`tiktoken` 的 cl100k_base 词表烤进镜像(`TIKTOKEN_CACHE_DIR`,运行时容器内常下载失败)。rerank 改走 SiliconFlow API 后,镜像不再需要 torch / sentence-transformers / libgomp1(瘦约 4GB)。
   - 新增 `entrypoint.sh`:先 `python -m scripts.init_db` 幂等建表 → `exec uvicorn ... --host 0.0.0.0`(exec 让 uvicorn 占 PID 1,`docker stop` 的 SIGTERM 才能直达优雅退出)。
   - 新增 `.dockerignore`:排 `.venv`/`__pycache__`/`.env`/`.git` 等(secrets 不进镜像,运行时由 compose `env_file` 注入)。
   - `docker-compose.yml` 加 `app` 服务:`depends_on: postgres(service_healthy)`、覆盖 `DATABASE_URL` 走服务名 `postgres:5432`、`HF_HOME=/models` 挂 `hf_cache` volume;一键 `docker compose up`。
@@ -220,7 +221,7 @@
   - `metrics.py` 加 `MODEL_PRICES` 单价表 + `rag_llm_cost_total` Counter + 统一入口 `record_usage(model, usage)`(记 token + 按单价累加成本;embedding 的 usage 无 `completion_tokens`,用 `getattr` 兜底)。
   - `retrieval.py` 的 `_record_token_usage` 改为委托 `record_usage`;`chat.py` 的 `_rewrite_query` 补 `record_usage`——**补上原先漏计的 rewrite token**(Day 6 缺口)。
   - README 重写:架构图(mermaid 请求流 + compose 编排)、两种运行方式(全栈一键 / 本地开发)、API 表、缓存与成本的已知限制 + 面试题。`docker compose config` 校验三服务编排合法。
-  - ⚠️ 待本机冒烟:`docker compose up --build` 全栈起通 + `/metrics` 见非 0 `rag_llm_cost_total`(需先把 `MODEL_PRICES` 换成中转站实际单价)。
+  - ⚠️ 待本机冒烟:`docker compose up --build` 全栈起通 + `/metrics` 见非 0 `rag_llm_cost_total`(需先把 `MODEL_PRICES` 换成硅基流动实际单价)。
 
 ---
 
@@ -237,7 +238,7 @@
 | ~~Day 4~~(已完成) | 流式输出 | ✅ SSE + `StreamingResponse` + `chat.completions.create(stream=True)` + 前端 `fetch` ReadableStream。拆 `retrieve`/`generate_stream`,先拉一帧分段错误处理。详见第 5 节与 `docs/PITFALLS.md`(P10–P14) |
 | ~~Day 5~~(已完成) | 结构化日志 | ✅ structlog JSON 管道 + 桥接 stdlib + `trace_context_middleware`(trace_id/contextvars)+ 请求级 timing。⚠️ 最小实现:uvicorn 未统一、无分段 timing、无细粒度异常映射。详见第 5 节与 `docs/INTERVIEW.md` 条目 G |
 | ~~Day 6~~(已完成) | 基础监控 | ✅ `prometheus_client` 5 指标(请求数/延迟/token/召回数/rerank 分数)+ `/metrics` 端点。⚠️ rerank 指标因开关关着无数据、rewrite token 未计、未接 Prometheus/Grafana。详见第 5 节 |
-| ~~Day 7~~(已完成) | Docker 整合 | ✅ 提交 `1bed96a`:`Dockerfile`(app 镜像,torch CPU 版 / tiktoken 词表烤进镜像 / 依赖分层缓存)+ `entrypoint.sh`(建表 → `exec uvicorn` 占 PID 1)+ compose 编排两服务 + HF 缓存 volume + `.dockerignore`,一键 `docker compose up` |
+| ~~Day 7~~(已完成) | Docker 整合 | ✅ 提交 `1bed96a`:`Dockerfile`(app 镜像,tiktoken 词表烤进镜像 / 依赖分层缓存,rerank 走 API 后无需 torch)+ `entrypoint.sh`(建表 → `exec uvicorn` 占 PID 1)+ compose 编排两服务 + HF 缓存 volume + `.dockerignore`,一键 `docker compose up` |
 
 ### Week 8 — 后端工程化(压缩版,已全部完成)
 
@@ -262,13 +263,13 @@
 ## 7. 已知限制与技术债
 
 - **PDF 解析对扫描件无效**:无文本层需 OCR,超出当前范围
-- **中转站限流/稳定性**:限流取决于服务商;chat 长生成仍可能断连,大文档入库受其约束;长对话多一次 query rewrite 调用,更吃用量
+- **硅基流动限流/稳定性**:限流取决于服务商;chat 长生成仍可能断连,大文档入库受其约束;长对话多一次 query rewrite 调用,更吃用量
 - **`similarity` 字段语义模糊**:经 RRF 后是 `min(1.0, rrf_score*30)`,既非 cosine 也非纯 RRF;生产建议改用 rank
 - ~~**RAG 失败留空会话**~~:**已于 Day 2 修复**——写库全部移到 RAG 成功之后,`handle_chat` 单事务一次 commit,失败回滚不留空会话
-- **chat 调用无重试**:`rewrite_query` / `_generate_answer` / `_generate_answer_stream` 的 `chat.completions.create` 都是裸调,不像 `embedding.py` 有 tenacity 退避;中转站撞 429/断连直接 502(流式则在开流后变成 error 帧)。生产需补(可复用 embedding 的退避思路,异常类型用 `openai.APIError`)
+- **chat / rerank 调用无重试**:`rewrite_query` / `_generate_answer` / `_generate_answer_stream` 的 `chat.completions.create` 与 `rerank.py` 的 httpx 调用都是裸调,不像 `embedding.py` 有 tenacity 退避;硅基流动撞 429/断连直接 502(流式则在开流后变成 error 帧)。生产需补(复用 embedding 的退避思路,异常类型:chat 用 `openai.APIError`、rerank 用 `httpx.HTTPError`)
 - **`ENABLE_RERANK` 当前为 `False`**:`retrieval.py` 的 A/B 开关现在关着,rerank 未生效,召回排序质量打折(流式不受影响)。要测召回质量记得改回 `True`
 - **日志可观测性是最小实现(Day 5)**:uvicorn 自带 logging 未并入统一管道(原生格式、无 trace_id);只有请求级 timing,无 service 内分段 timing(rewrite/retrieve/generate);异常仅全局 500 兜底 + query.py 的 404/502,无细粒度状态码映射(401/403/429/503)。生产需补,详见 `docs/INTERVIEW.md` 条目 G
-- **监控是最小实现(Day 6/8)**:`rag_rerank_score` 因 `ENABLE_RERANK=False` 无数据;只暴露 `/metrics`,未接 Prometheus 抓取 + Grafana 看板。生产需补。(rewrite token 已于 Week 8 补计;成本 `rag_llm_cost_total` 已加,但 `MODEL_PRICES` 是**占位单价**,需按中转站实际计费改才有意义,currency 单位也取决于中转站)
+- **监控是最小实现(Day 6/8)**:`rag_rerank_score` 因 `ENABLE_RERANK=False` 无数据;只暴露 `/metrics`,未接 Prometheus 抓取 + Grafana 看板。生产需补。(rewrite token 已于 Week 8 补计;成本 `rag_llm_cost_total` 已加,但 `MODEL_PRICES` 是**占位单价**,需按硅基流动实际计费改才有意义,currency 单位也取决于硅基流动)
 - **答案缓存无精确失效(Week 8)**:`ans:*` 只靠 TTL(1 小时)容忍过时,上传新文档后不会主动清相关缓存,旧答案最长存活 1 小时。生产应在 `/upload` 成功后清 `ans:*`(或更细粒度)。另:embedding 缓存未做"惊群"防护(同一冷 key 并发全部 miss 各打一次 API)、未做二进制紧凑序列化(现 JSON ~20-30KB/条);**语义缓存**(按相似度命中近义问)未做
 - **标题孤儿问题**:Markdown 标题可能被单独切成一个无信息 chunk(如 `## 检索流程`);未处理,Week 13-14 评测暴露后再优化(可选 MarkdownHeaderTextSplitter)
 - **chunk 策略是"凑合能用"**:chunk_size=500/overlap=50 是起步值,未调优;overlap 仅在"切碎超长段落"时生效,纯段落合并不加 overlap
@@ -336,4 +337,4 @@ API 文档:`http://127.0.0.1:8000/docs`
 5. 遇到"看不懂",换更浅的前端类比重讲,不堆术语;不要用 zod 类比。
 6. 选型给明确推荐 + 一句理由;信息不足直接问。
 7. 优先让学习者自己实现,再对照讲框架封装(如 Week 9 LangGraph)。
-8. 涉及 Anthropic/Gemini 产品的具体参数(限流、模型名、API 形态)可能过时,需要时联网核实而非凭记忆。
+8. 涉及第三方模型/服务(硅基流动 / Qwen / Anthropic 等)的具体参数(限流、模型名、API 形态)可能过时,需要时联网核实而非凭记忆。

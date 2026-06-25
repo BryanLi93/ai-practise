@@ -56,6 +56,8 @@ async def _rewrite_query(question: str, recent_messages: list[Message]) -> str:
         ],
         temperature=0.1,
         max_tokens=256,
+        # Qwen3.5 思考模型,查询改写更不需要思考链(256 token 根本不够它想)
+        extra_body={"enable_thinking": False},
     )
     metrics.record_usage(settings.chat_model, response.usage)
 

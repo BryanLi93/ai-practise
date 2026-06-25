@@ -1,25 +1,25 @@
 # RAG Service
 
-一个从零手写的生产级 RAG 问答服务,使用 FastAPI + PostgreSQL/pgvector + Redis + OpenAI 兼容中转站。支持文件上传、混合检索、Rerank、引用溯源、多轮对话、流式输出、缓存与可观测性。
+一个从零手写的生产级 RAG 问答服务,使用 FastAPI + PostgreSQL/pgvector + Redis + 硅基流动(SiliconFlow)。支持文件上传、混合检索、Rerank、引用溯源、多轮对话、流式输出、缓存与可观测性。
 
 ## 架构特点
 
 - **混合检索**: pgvector 余弦距离 + tsvector + zhparser 中文分词,RRF 融合
-- **三段式 pipeline**: 召回(混合) → 精排(BGE-reranker-v2-m3) → 生成(gpt-5.4)
+- **三段式 pipeline**: 召回(混合) → 精排(BGE-reranker-v2-m3) → 生成(Qwen/Qwen3.5-4B)
 - **引用溯源**: 答案带 `[n]` 标注,sources 数组返回完整 chunk 元数据
 - **多轮对话**: 服务端持有历史 + Query Rewriting(消解指代/省略,改写句走检索、原话走生成)
 - **流式输出**: SSE 逐 token 推送,前端打字机渲染
 - **Redis 缓存**: embedding(纯函数,7 天)+ 首轮答案缓存(1 小时);缓存 best-effort,Redis 故障自动降级不拖垮主流程
 - **可观测性**: structlog 结构化日志(trace_id 贯穿)+ Prometheus 指标(请求数 / 延迟 / token / 成本)
-- **中文友好**: zhparser 中文分词,embedding 维度 1536(text-embedding-3-small 原生)
+- **中文友好**: zhparser 中文分词,embedding 用 bge-m3(1024 维,多语言)
 
 ## 技术栈
 
 - FastAPI + SQLAlchemy 2.0 (async, psycopg v3)
 - PostgreSQL 16 + pgvector (halfvec) + zhparser
 - Redis 7 (redis-py async)
-- OpenAI text-embedding-3-small (1536d) + gpt-5.4(均经 OpenAI 兼容中转站)
-- BGE-reranker-v2-m3 (sentence-transformers)
+- 硅基流动(SiliconFlow):chat `Qwen/Qwen3.5-4B`(思考模型,`enable_thinking=False`)+ embedding `BAAI/bge-m3`(1024d)
+- Rerank `BAAI/bge-reranker-v2-m3`(经硅基流动 `/v1/rerank` API)
 - structlog + prometheus-client
 - Docker Compose 编排(app + postgres + redis)
 
@@ -36,7 +36,7 @@ flowchart TD
     EC -->|否| EAPI[Embedding API] --> RET
     RET[混合检索 RRF] --> PG[(PostgreSQL<br/>pgvector + zhparser)]
     RET --> RANK[BGE-reranker 精排]
-    RANK --> GEN[gpt-5.4 流式生成]
+    RANK --> GEN[Qwen3.5-4B 流式生成]
     GEN --> OUT --> U
     GEN -. 写回 .-> AC
     EAPI -. 写回 .-> EC
@@ -55,7 +55,7 @@ flowchart LR
     end
     APP --> PG
     APP --> REDIS
-    APP --> RELAY[OpenAI 兼容中转站]
+    APP --> RELAY[硅基流动 SiliconFlow]
 ```
 
 ## 快速开始
@@ -66,7 +66,7 @@ flowchart LR
 
 ```bash
 cp .env.example .env
-# 编辑 .env,填 OPENAI_API_KEY / OPENAI_BASE_URL(中转站,通常以 /v1 结尾)
+# 编辑 .env,填 OPENAI_API_KEY / OPENAI_BASE_URL(硅基流动:https://api.siliconflow.cn/v1)
 docker compose up -d --build
 ```
 
@@ -84,7 +84,7 @@ docker compose up -d --build
 docker compose up -d postgres redis      # 只起依赖服务
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env                      # 填中转站配置
+cp .env.example .env                      # 填硅基流动配置
 python -m scripts.init_db                 # 建表
 fastapi dev app/main.py                   # 起服务(热重载)
 ```
@@ -116,11 +116,11 @@ python -m scripts.show_metrics       # 打印指标快照
 
 - PDF 解析对扫描件(无文本层)无效,需要 OCR
 - 答案缓存只对**无历史首轮**安全(带历史非纯函数);失效靠 TTL(1 小时),未做上传文档时精确清缓存
-- chat 调用(rewrite / 生成)暂无重试,中转站撞 429 / 断连直接报错
+- chat(rewrite / 生成)与 rerank 调用暂无重试,硅基流动撞 429 / 断连直接报错
 - `ENABLE_RERANK` 是 A/B 开关,当前默认关闭;开启后召回排序质量更好
-- `MODEL_PRICES` 是占位单价,成本指标要按中转站实际计费修改才有意义
+- `MODEL_PRICES` 是占位单价,成本指标要按硅基流动实际计费修改才有意义
 - 监控只暴露 `/metrics`,未接真实 Prometheus 抓取 + Grafana 看板
-- 中转站限流取决于服务商,大文档入库受其约束;chat 长生成偶有断连
+- 硅基流动限流取决于服务商,大文档入库受其约束;chat 长生成偶有断连
 - 知识库小于 ~100 chunks 时混合检索的优势不明显
 
 ## 后续路线
@@ -132,8 +132,9 @@ python -m scripts.show_metrics       # 打印指标快照
 ## For 面试
 
 用户问一个问题，端到端发生了什么？请按时间顺序写出每一步。
-为什么 chunks 表的 embedding 列要用 halfvec(1536) 而不是 vector(3072)？
-为什么从 Gemini 迁到 OpenAI 兼容中转站？换 embedding 模型为什么必须清库重新入库？
+为什么 chunks 表的 embedding 列要用 halfvec(1024) 而不是 vector(1024)？(half 精度存储减半)
+为什么用 OpenAI 兼容接口接入硅基流动(chat / embedding / rerank)？换 embedding 模型为什么必须清库重新入库？
+Qwen3.5 是思考模型,RAG 生成 / 查询改写为什么要 enable_thinking=False？(思考链吃光 max_tokens 致 content 为空 + 浪费 token 与延迟)
 db.flush() 和 db.commit() 的差别是什么？为什么 ingest 服务里要 flush 而不直接 commit？
 RAG 的"幻觉"是怎么产生的？我们的 prompt 是怎么约束的？
 
@@ -148,6 +149,6 @@ RAG 的"幻觉"是怎么产生的？我们的 prompt 是怎么约束的？
 缓存挂了会怎样？best-effort 降级成"无缓存",GET/SET 吞掉 RedisError,绝不拖垮主服务。
 流式怎么命中缓存？按同一帧协议重放(sources → 整段答案一帧 token → done),前端无感知。
 
-做过一个完整的 RAG service。技术栈是 FastAPI + PostgreSQL/pgvector,LLM 走 OpenAI 兼容中转站(chat gpt-5.4 + embedding text-embedding-3-small)。
-检索是三段式:召回用 pgvector 余弦距离 + zhparser 中文分词的 tsvector 混合检索,RRF 融合(因为两路分数量纲不同);精排用 BGE-reranker-v2-m3 cross-encoder 对 top 20 重排;生成用 gpt-5.4,prompt 强约束基于 context 回答并要求 [n] 引用标注。
-几个工程细节:embedding 维度选 1536(text-embedding-3-small 原生,正好在 pgvector HNSW 2000 维上限内);PDF 解析用 PyMuPDF 加启发式去重复页眉页脚;限流用 tenacity 退避 + 主动节流处理;Redis 缓存 embedding 与首轮答案,缓存 best-effort 降级;structlog + Prometheus 做日志与指标(token / 延迟 / 成本)。还做过一次 provider 迁移(Gemini 原生 → OpenAI 中转站),踩过"换 embedding 模型必须清库重灌"的坑。
+做过一个完整的 RAG service。技术栈是 FastAPI + PostgreSQL/pgvector,LLM 走硅基流动(SiliconFlow)OpenAI 兼容接口(chat Qwen/Qwen3.5-4B + embedding BAAI/bge-m3)。
+检索是三段式:召回用 pgvector 余弦距离 + zhparser 中文分词的 tsvector 混合检索,RRF 融合(因为两路分数量纲不同);精排用 BGE-reranker-v2-m3 cross-encoder(走硅基流动 /v1/rerank)对 top 20 重排;生成用 Qwen/Qwen3.5-4B(思考模型,生成时 enable_thinking=False),prompt 强约束基于 context 回答并要求 [n] 引用标注。
+几个工程细节:embedding 用 bge-m3(固定 1024 维,远在 pgvector HNSW 2000 维上限内);PDF 解析用 PyMuPDF 加启发式去重复页眉页脚;限流用 tenacity 退避 + 主动节流处理;Redis 缓存 embedding 与首轮答案,缓存 best-effort 降级;structlog + Prometheus 做日志与指标(token / 延迟 / 成本)。LLM 统一走 OpenAI 兼容接口,换 provider / 模型只改 .env;踩过"换 embedding 模型必须清库重灌向量"的坑。

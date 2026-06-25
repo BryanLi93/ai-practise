@@ -12,7 +12,7 @@ tiktoken
 tenacity
 langchain-text-splitters
 pymupdf
-sentence-transformers
+httpx
 structlog
 prometheus-client
 redis

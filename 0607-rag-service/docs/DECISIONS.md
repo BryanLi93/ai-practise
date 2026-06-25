@@ -1,18 +1,18 @@
-# 技术决策与理由（41 条）
+# 技术决策与理由（42 条）
 
 > 项目的核心知识点,也是面试高频考点。每条都是"踩过/讨论过"才定下来的。
 > CLAUDE.md 第 3 节只保留标题索引,完整理由在这里;用到某条时按编号查。
 
 ## 向量与存储
-1. **目标维度 1536**:pgvector 的 HNSW/IVFFlat 索引上限是 2000 维,`halfvec` 半精度把上限提到 4000;1536 是"存储成本 / 质量 / 索引约束 / 行业惯例"的交集。现用 `text-embedding-3-small`,**原生就是 1536,无需截断**。OpenAI `text-embedding-3` 系列同样是 MRL(Matryoshka)模型:若换成 `text-embedding-3-large`(原生 3072),用 `dimensions=1536` 截断,语义损失极小——这正是早期用 Gemini(3072→1536)时的同一招。
-2. **`halfvec` 而非 `vector`**:float16 半精度,存储减半,索引性能更好;在 1536 维下质量损失可忽略。
+1. **目标维度 1024**:现用 `BAAI/bge-m3`,**固定输出 1024 维**,不支持 `dimensions` 参数(硅基流动的 dimensions 只对 Qwen3 系列生效),也没有 MRL 截断的余地——维度由模型定死。pgvector 的 HNSW/IVFFlat 索引上限是 2000 维(`halfvec` 半精度把上限提到 4000),1024 远在其内。
+2. **`halfvec` 而非 `vector`**:float16 半精度,存储减半,索引性能更好;在 1024 维下质量损失可忽略。
 3. **维度是数据库的契约**:模型和维度一旦定死,改动需要全量重新 embed。入库时把 `embedding_model` 和 `dim` 记进 metadata,便于未来迁移。
 
 ## Embedding 调用
-4. ~~**embedding 必须用 `google-genai` 原生 SDK**(因 task_type 兼容层缺失)~~——已废:整体迁到 OpenAI(本就无 task_type),chat + embedding 统一 `openai` SDK,见 #41。
-5. **Asymmetric vs Symmetric embedding(概念仍是考点)**:Gemini 是**非对称**——入库用 `task_type=RETRIEVAL_DOCUMENT`、查询用 `RETRIEVAL_QUERY`,把"文档"和"问题"投到更易匹配的空间,几乎免费的召回提升。**OpenAI `text-embedding-3` 是对称的**,query 和 document 用同一编码、无 task_type。迁移后现实现是对称;被问到要能讲清两者区别和取舍。
-6. **限流处理**:批量调用(单批 ≤100)+ 批间主动节流 + tenacity 指数退避双保险。批量是必须而非优化——单条串行会卡几十秒。节流值随 provider 变:Gemini free tier 要 13s(~5 RPM),OpenAI 中转站宽松,降到 0.5s,主要靠退避兜底;重试异常类型用 `openai.APIError`。
-7. **embedding 是同步阻塞调用要 await**;chat 同理。ML 本地推理(rerank)用 `asyncio.to_thread` 推到线程池,避免阻塞事件循环。
+4. **chat + embedding 统一用 `openai` SDK**(指向硅基流动 base_url):OpenAI 兼容接口,换 provider/模型只改 .env,见 #41。
+5. **Asymmetric vs Symmetric embedding(概念仍是考点)**:有些模型**非对称**——给"文档"和"问题"分别优化向量空间(如 Gemini 的 `task_type=RETRIEVAL_DOCUMENT/QUERY`、E5 的 `query:/passage:` 前缀),几乎免费的召回提升。`bge-m3` 本身支持 query/passage 用法,但当前经硅基流动 embeddings 接口是**对称**调用(不加前缀),`embed_documents` 和 `embed_query` 只差"批量 vs 单条"。被问到要能讲清两者区别和取舍——以及"想再榨召回可加 query/passage 前缀"。
+6. **限流处理**:批量调用(单批 ≤32,硅基流动 embeddings 硬上限就是 32 条/请求)+ 批间主动节流 + tenacity 指数退避双保险。批量是必须而非优化——单条串行会卡几十秒。节流值随 provider 变:Gemini free tier 要 13s(~5 RPM),硅基流动宽松,降到 0.5s,主要靠退避兜底;重试异常类型用 `openai.APIError`。
+7. **embedding / chat 是异步网络调用,直接 await**。rerank 改走硅基流动 `/v1/rerank` 后也是异步网络调用(httpx),直接 `await`,不再像本地 cross-encoder 那样用 `asyncio.to_thread` 推线程池(那是给阻塞型本地推理用的)。
 
 ## 检索(三段式:召回 → 精排 → 生成)
 8. **pgvector 而非 ChromaDB**:更贴近国内生产栈;一次 SQL 同时做向量 + 全文检索。ChromaDB 仅作 Week 5 学习对比。
@@ -23,14 +23,14 @@
 13. **RRF 融合而非加权求和**:RRF 只用排名,与分数量纲无关(cosine 在 [0,1],BM25 不限上界);超参 `k=60` 是社区共识值。微软/ES/Vespa 默认都用 RRF。
 14. **召回候选 = top_k × 4**:让 RRF 能发现"两路都召回但单路名次靠后"的跨路共识 chunk。
 15. **三段式检索**:召回(混合,快/宽)→ 精排(cross-encoder,慢/精)→ 生成。这是 RAG 工业标准架构。
-16. **Rerank 用 BGE-reranker-v2-m3 本地模型,而非 Cohere API**:Cohere 国内访问不稳,生产不能依赖境外服务(面试考点);BGE 开源、中英 SOTA。
+16. **Rerank 用 BGE-reranker-v2-m3,经硅基流动 `/v1/rerank` API**:模型选 BGE(开源、中英 SOTA);不走 Cohere 是因为国内访问境外服务不稳(面试考点)。早期在本地用 `sentence-transformers` 跑 cross-encoder,后改走硅基流动同款模型的 API——省掉 torch / sentence-transformers 依赖(镜像瘦约 4GB),代价是多一次网络往返、分数从未归一化 logit 变 0-1。
 17. **Bi-encoder vs Cross-encoder 的本质区别**:召回是 bi-encoder(query 和 doc 独立编码,可预先建索引,快);rerank 是 cross-encoder(query+doc 拼一起进模型,token 互相 attention,精度高但不可索引)。这是"必须分两段"的信息论根因,不是 trick。
 18. **`RERANK_CANDIDATES=20` 是 rerank 入口宽度**;`top_k` 是 rerank 出口/LLM 入口宽度。三个常量是逐级缩小的漏斗:`top_k×4`(每路召回)→ 20(RRF 出口)→ 5(rerank 出口)。
 
 ## 生成
 19. **system prompt 走独立的 system 角色**,不拼进用户内容:缓存友好、模型对齐、服从度更高。当前用 OpenAI 接口,即 `messages=[{"role":"system",...},{"role":"user",...}]`(早期 Gemini 是 `system_instruction` 参数,同一思想的不同写法)。
 20. **temperature=0.1**:RAG 要忠实不要创意,低温减少幻觉。不写 0.0 因为完全确定性偶尔陷入局部模式。
-21. **强 prompt 约束 + few-shot**:Free tier 的 Flash 服从度不如 Pro,必须用"必须""禁止"级指令 + 示例,才能稳定输出 `[n]` 引用标注。
+21. **强 prompt 约束 + few-shot**:小模型(如 Qwen3.5-4B)服从度不如大模型,必须用"必须""禁止"级指令 + 示例,才能稳定输出 `[n]` 引用标注。
 22. **chunks 用 `---` 分隔拼 context**:防止 LLM 把不同来源误认为连续段落。
 
 ## 引用溯源
@@ -57,5 +57,8 @@
 37. **service / router 分层**:router 只管 HTTP 协议,业务逻辑在 service;内部用 dataclass 传递,对外用 Pydantic schema。
 38. **全局异常处理器**:兜底未捕获异常,只暴露异常类型名给客户端,完整 traceback 进日志(防信息泄露)。
 
-## Provider 迁移
-41. **Gemini 原生 SDK → OpenAI 兼容中转站**:Gemini 直连常断连,chat + embedding 统一切到中转站(chat=`gpt-5.4` / embedding=`text-embedding-3-small`,统一 `openai` SDK)。一笔带过即可,唯一值得记的技术点:换 embedding 模型会让旧向量作废(跨模型不可比),必须清库重灌——即 #3"维度是契约"的延伸。
+## Provider
+41. **走硅基流动(SiliconFlow)OpenAI 兼容接口**:chat=`Qwen/Qwen3.5-4B` / embedding=`BAAI/bge-m3` / rerank=`BAAI/bge-reranker-v2-m3`;chat+embedding 用 `openai` SDK,rerank 用 httpx 调 `/v1/rerank`,换 provider/模型只改 .env。唯一值得记的技术点:换 embedding 模型会让旧向量作废(跨模型不可比),必须清库重灌——即 #3"维度是契约"的延伸。
+
+## 思考模型
+42. **Qwen3.5-4B 是思考模型,生成 / 改写都关掉 `enable_thinking`**:它默认先输出一大段 `reasoning_content` 再给 `content`。在有 `max_tokens` 上限的 RAG 生成里,思考链会把额度耗光,`content` 直接为空(`finish_reason=length`)。三处 chat 调用(`_generate_answer` / `_generate_answer_stream` / `_rewrite_query`)都传 `extra_body={"enable_thinking": False}`:RAG 要的是基于 context 的直接答案,思考既浪费 token / 延迟又触发空响应 bug。

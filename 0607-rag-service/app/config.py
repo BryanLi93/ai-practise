@@ -3,12 +3,13 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
-    # LLM —— chat 和 embedding 都走 OpenAI 兼容中转站
-    openai_api_key: str          # 中转站 key
-    openai_base_url: str         # 中转站 baseURL,通常以 /v1 结尾
-    chat_model: str              # chat 模型名,如 gpt-5.4
-    embedding_model: str         # embedding 模型名,如 text-embedding-3-small
-    embedding_dim:int = 1536
+    # LLM —— chat / embedding / rerank 都走硅基流动(SiliconFlow)OpenAI 兼容接口
+    openai_api_key: str          # 硅基流动 API Key
+    openai_base_url: str         # 硅基流动 baseURL:https://api.siliconflow.cn/v1
+    chat_model: str              # chat 模型名,如 Qwen/Qwen3.5-4B
+    embedding_model: str         # embedding 模型名,如 BAAI/bge-m3
+    embedding_dim:int = 1024     # bge-m3 固定 1024 维(不支持 dimensions 参数)
+    rerank_model: str = "BAAI/bge-reranker-v2-m3"  # 走 SiliconFlow /v1/rerank
 
     # Database
     database_url: str

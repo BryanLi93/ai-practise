@@ -1,62 +1,57 @@
 """
-Rerank 层:用 BGE-reranker-v2-m3 对召回候选做精排。
+Rerank 层:调用硅基流动(SiliconFlow)的 /v1/rerank 对召回候选做精排。
+
+模型 BAAI/bge-reranker-v2-m3 不再本地推理,改走 SiliconFlow 的 rerank 接口
+——它不是 OpenAI SDK 的方法,得用 httpx 裸调。和 chat/embedding 共用同一个
+base_url + key(见 config)。
 """
 from __future__ import annotations
 
 import logging
 from typing import Sequence
 
-from sentence_transformers import CrossEncoder
+import httpx
+
+from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-# ---------- 模型加载 ----------
-_RERANKER_MODEL_ID = "BAAI/bge-reranker-v2-m3"
-_reranker: CrossEncoder | None = None
-
-def get_reranker() -> CrossEncoder:
-    """懒加载 reranker 模型(进程内单例)。"""
-    global _reranker
-    if _reranker is None:
-        logger.info("loading reranker model: %s", _RERANKER_MODEL_ID)
-        _reranker = CrossEncoder(
-            _RERANKER_MODEL_ID,
-            max_length=512,        # query+chunk 拼接后的 token 上限
-            device=_pick_device(),
-        )
-        logger.info("reranker loaded on %s", _reranker.model.device)
-    return _reranker
-
-def _pick_device() -> str:
-    """自动选择最佳设备:MPS(M 系列 Mac) > CUDA > CPU。"""
-    import torch
-    if torch.backends.mps.is_available():
-        return "mps"
-    if torch.cuda.is_available():
-        return "cuda"
-    return "cpu"
+# base_url 已经是 .../v1,拼上 /rerank 就是完整端点
+_RERANK_URL = settings.openai_base_url.rstrip("/") + "/rerank"
+_TIMEOUT = httpx.Timeout(30.0)
 
 
-# ---------- 对外 API ----------
-def rerank(
-    query: str,
-    documents: Sequence[str]
-) -> list[float]:
+async def rerank(query: str, documents: Sequence[str]) -> list[float]:
     """
-    对一组候选文档按相关性打分。
+    对一组候选文档按相关性打分(走 SiliconFlow /v1/rerank)。
 
     Args:
         query: 用户问题
         documents: 候选 chunks 的文本列表
 
     Returns:
-        和 documents 等长的相关性分数列表。
-        分数越高越相关。BGE-reranker 的分数是 logit,不归一化。
+        和 documents 等长、按输入顺序对齐的相关性分数列表(0-1,越大越相关)。
+        API 按分数降序返回 {index, relevance_score},这里按 index 回填到原顺序;
+        裁剪 top_k 交给调用方(retrieval._rerank_chunks),所以这里不传 top_n。
     """
     if not documents:
         return []
 
-    reranker = get_reranker()
-    pairs = [(query, doc) for doc in documents]
-    scores = reranker.predict(pairs, show_progress_bar=False)
-    return [float(s) for s in scores]
+    payload = {
+        "model": settings.rerank_model,
+        "query": query,
+        "documents": list(documents),
+        "return_documents": False,
+    }
+    headers = {"Authorization": f"Bearer {settings.openai_api_key}"}
+
+    async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+        resp = await client.post(_RERANK_URL, json=payload, headers=headers)
+        resp.raise_for_status()
+        data = resp.json()
+
+    # 按输入顺序对齐:先全填 0,再按 result.index 回填实际分数
+    scores = [0.0] * len(documents)
+    for item in data["results"]:
+        scores[item["index"]] = float(item["relevance_score"])
+    return scores

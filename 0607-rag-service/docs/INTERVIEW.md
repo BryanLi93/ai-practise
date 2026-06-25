@@ -7,9 +7,9 @@
 
 ## 0. 电梯陈述(开场 30 秒)
 
-> 我做了一个完整的 RAG 问答服务,技术栈是 FastAPI + PostgreSQL/pgvector,LLM 走 **OpenAI 兼容中转站**(chat 用 gpt-5.4,embedding 用 text-embedding-3-small)。
-> 检索是**三段式**:召回用 pgvector 余弦距离加 zhparser 中文分词的 tsvector 做**混合检索**,用 **RRF** 融合两路(因为两路分数量纲不可比);精排用 **BGE-reranker-v2-m3** 这个 cross-encoder 对 top 20 重排;生成用 gpt-5.4,prompt 强约束"只基于 context 回答"并要求 `[n]` 引用标注做溯源。
-> 几个工程细节:embedding 维度选 1536(text-embedding-3-small 原生,正好压在 pgvector HNSW 2000 维上限内);PDF 解析用 PyMuPDF 加启发式去重复页眉页脚;限流用 **tenacity 退避 + 主动节流** 处理。
+> 我做了一个完整的 RAG 问答服务,技术栈是 FastAPI + PostgreSQL/pgvector,LLM 走 **硅基流动(SiliconFlow)OpenAI 兼容接口**(chat 用 Qwen/Qwen3.5-4B,embedding 用 BAAI/bge-m3)。
+> 检索是**三段式**:召回用 pgvector 余弦距离加 zhparser 中文分词的 tsvector 做**混合检索**,用 **RRF** 融合两路(因为两路分数量纲不可比);精排用 **BGE-reranker-v2-m3** 这个 cross-encoder(走硅基流动 `/v1/rerank`)对 top 20 重排;生成用 Qwen/Qwen3.5-4B(思考模型,生成时关掉 `enable_thinking`),prompt 强约束"只基于 context 回答"并要求 `[n]` 引用标注做溯源。
+> 几个工程细节:embedding 用 bge-m3(固定 1024 维,远在 pgvector HNSW 2000 维上限内);PDF 解析用 PyMuPDF 加启发式去重复页眉页脚;限流用 **tenacity 退避 + 主动节流** 处理。
 
 ---
 
@@ -18,37 +18,37 @@
 **核心**:向量化问题 → 混合召回 → RRF 融合 → 精排 → 拼 context → LLM 生成带引用的答案。
 
 **展开(按时间顺序 6 步)**:
-1. **问题向量化** —— `embed_query` 调 OpenAI `embeddings.create`(text-embedding-3-small),得到 1536 维向量。OpenAI 是对称 embedding,query 和 document 用同一模型,没有 task_type(早期 Gemini 才区分 RETRIEVAL_QUERY/DOCUMENT)。
+1. **问题向量化** —— `embed_query` 调 `embeddings.create`(bge-m3,经硅基流动),得到 1024 维向量。当前是对称调用,query 和 document 用同一模型、不加 query/passage 前缀(bge-m3 本身支持非对称用法,这里没用)。
 2. **两路召回** —— 向量路按 `cosine_distance` 排序取 top 80;关键词路用 zhparser 把问题分词成 `词A | 词B` 的 OR 查询,按 `ts_rank_cd` 排序取 top 80。各自返回 `{chunk_id: 名次}`。
 3. **RRF 融合** —— 对两路并集里每个 chunk 算 `score = Σ 1/(60+rank)`,降序取前 20。
-4. **精排** —— (开启时)BGE cross-encoder 把 query 和每个 chunk 拼一起打分,重排取 top_k;放在 `asyncio.to_thread` 里跑,不阻塞事件循环。
+4. **精排** —— (开启时)调硅基流动 `/v1/rerank`(BGE cross-encoder)把 query 和每个 chunk 成对打分,按分数重排取 top_k;httpx 异步调用,返回的乱序结果按 index 对齐回输入顺序。
 5. **拼 context** —— 把 chunk 编号成 `[1] ... [2] ...`。
-6. **生成** —— gpt-5.4(`chat.completions.create`),system 消息强约束只用 context、强制 `[n]` 标注、找不到就明说;`temperature=0.1` 降低发挥。最后路由层把 chunks 组装成带 `similarity` 和引用编号的 `sources` 数组一起返回。
+6. **生成** —— Qwen/Qwen3.5-4B(`chat.completions.create`,`extra_body={"enable_thinking": False}` 关思考链),system 消息强约束只用 context、强制 `[n]` 标注、找不到就明说;`temperature=0.1` 降低发挥。最后路由层把 chunks 组装成带 `similarity` 和引用编号的 `sources` 数组一起返回。
 
 **对应代码**:`app/services/retrieval.py` 的 `query()` 函数。
 
 ---
 
-## 2. 为什么 embedding 列用 halfvec(1536) 而不是 vector(3072)?
+## 2. 为什么 embedding 列用 halfvec(1024) 而不是 vector(1024)?
 
-**核心**:为了能建 HNSW 索引(维度上限 2000),同时省一半存储。
+**核心**:维度由模型(bge-m3)定死为 1024;`halfvec` 半精度比 `vector` 省一半存储。
 
 **展开**:
 - pgvector 的 HNSW 索引维度上限是 2000,超了就建不了近似索引、只能全表暴力扫。所以目标维度要 ≤2000。
-- 现用 `text-embedding-3-small`,**原生就是 1536**,天然落在上限内、不用截断。若换 `text-embedding-3-large`(原生 3072),OpenAI `text-embedding-3` 系列是 **Matryoshka(MRL)** 模型,前面的维度承载最重要语义,可用 `dimensions=1536` **截断**而语义损失很小(早期用 Gemini 的 3072→1536 也是这招)。
+- 现用 `BAAI/bge-m3`,**固定输出 1024 维**,远在上限内、本就不用截断;bge-m3 不支持 `dimensions` 参数(没有 MRL 截断那一手),维度由模型定死,数据库列宽必须跟着它走。
 - `halfvec` 用 16 位半精度存,比 `vector`(32 位)**省一半空间和内存带宽**,对召回精度几乎无影响。
 
-**对应代码**:`app/models.py` `HALFVEC(settings.embedding_dim)`;`app/embedding.py` `embeddings.create(dimensions=settings.embedding_dim)`。
+**对应代码**:`app/models.py` `HALFVEC(settings.embedding_dim)`(=1024);`app/embedding.py` `embeddings.create(...)` **不传** `dimensions`(bge-m3 固定维度)。
 
-⚠️ **诚实提醒**:1536 维是**为了能建 HNSW 而选的**,但当前代码里 `init_db` 只建了 tsvector 的 GIN 索引,**embedding 列还没有真正建 HNSW**,所以现在向量检索其实是暴力精确 KNN(小知识库够用)。被追问"那你建索引了吗",就说:"维度是预留给 HNSW 的,目前数据量小走的精确 KNN,加索引是一行 `Index(..., postgresql_using='hnsw', ...)` 的事。"
+⚠️ **诚实提醒**:1024 维是 `bge-m3` 定死的(正好 ≤2000,可建 HNSW),但当前代码 `init_db` 只建了 tsvector 的 GIN 索引,**embedding 列还没真正建 HNSW**,所以现在向量检索其实是暴力精确 KNN(小知识库够用)。被追问"那你建索引了吗",就说:"目前数据量小走的精确 KNN,加索引是一行 `Index(..., postgresql_using='hnsw', ...)` 的事。"
 
 ---
 
 ## 3. Asymmetric vs Symmetric embedding(原 task_type 问题)
 
-**核心**:**非对称** embedding 给"文档"和"查询"分别优化向量空间(更易匹配,召回略升);**对称** 两边同一编码。**我现在用 OpenAI `text-embedding-3`,是对称的、无 task_type**,所以 `embed_documents` 和 `embed_query` 只差"批量 vs 单条"。
+**核心**:**非对称** embedding 给"文档"和"查询"分别优化向量空间(更易匹配,召回略升);**对称** 两边同一编码。**我现在用 `bge-m3`,但走硅基流动接口是对称调用(不加 query/passage 前缀)**,所以 `embed_documents` 和 `embed_query` 只差"批量 vs 单条"。
 
-**展开**:非对称是不少检索模型的设计——Gemini 的 `task_type=RETRIEVAL_DOCUMENT/QUERY`、BGE 的 query/passage、E5 的 `"query:"/"passage:"` 前缀。被追问"你区分 query 和 doc 吗":现在不区分;若换 BGE-M3 等支持的模型可加角色前缀再榨点召回。
+**展开**:非对称是不少检索模型的设计——Gemini 的 `task_type=RETRIEVAL_DOCUMENT/QUERY`、BGE 的 query/passage、E5 的 `"query:"/"passage:"` 前缀。被追问"你区分 query 和 doc 吗":现在用的就是 `bge-m3`,它本身支持 query/passage,但当前没加前缀、是对称用;想再榨点召回可以加角色前缀。
 
 **对应代码**:`app/embedding.py` 的 `embed_documents` vs `embed_query`。
 
@@ -104,14 +104,14 @@ cross-encoder 每个 (query, doc) 对都要跑一次完整前向,**没法预先�
 
 **对应代码**:`_hybrid_retrieve` / `_rrf_fuse` / `_rerank_chunks` 在 `app/services/retrieval.py`。
 
-⚠️ **诚实提醒**:`ENABLE_RERANK` 当前是 `False`(retrieval.py:34),默认走 RRF 后直接截断。演示前改成 `True`,或者大方说"这是个可开关的对比实验,默认关掉是为了省本地推理"。
+⚠️ **诚实提醒**:`ENABLE_RERANK` 当前是 `False`(retrieval.py:35),默认走 RRF 后直接截断。演示前改成 `True`,或者大方说"这是个可开关的对比实验,默认关掉是为了省一次 rerank API 往返与费用"。
 
 ---
 
 ## 附加高频追问(面试官大概率会问)
 
 ### A. chunk_size 500、overlap 50 怎么定的?
-单位是**字符数**不是 token。500 字符中英混合大约 100~700 token,远低于 embedding 模型 2048 上限,语义也够完整。overlap 50 防止**句子在 chunk 边界被切断**导致语义丢失。用 `RecursiveCharacterTextSplitter`,分隔符从粗到细(段落→行→中英句末标点→…),优先在自然边界切。
+单位是**字符数**不是 token。500 字符中英混合大约 100~700 token,远低于 bge-m3 的 8192 token 上限,语义也够完整。overlap 50 防止**句子在 chunk 边界被切断**导致语义丢失。用 `RecursiveCharacterTextSplitter`,分隔符从粗到细(段落→行→中英句末标点→…),优先在自然边界切。
 ⚠️ 注意:overlap 只在"单个超长段落被迫切碎"时才生效;原始段落都小于 chunk_size 时走纯合并路径,相邻块之间没有 overlap(chunking.py:82 注释)。
 
 ### B. 中文检索怎么处理的?
@@ -119,10 +119,14 @@ PostgreSQL 默认不分中文词。我在 Docker 镜像里**自己编译了 SCWS
 **对应**:`docker/postgres/Dockerfile` + `init-extensions.sql` + `models.py:45`。
 
 ### C. 限流怎么扛的?两层
-1. **主动节流**:`embed_documents` 批之间 `sleep`,节流值随 provider 变——Gemini free tier 要 13s(~5 RPM),现在走 OpenAI 中转站宽松,降到 0.5s。
+1. **主动节流**:`embed_documents` 批之间 `sleep`,节流值随 provider 变——Gemini free tier 要 13s(~5 RPM),现在走硅基流动宽松,降到 0.5s(批大小也压到硅基流动上限 32 条/请求)。
 2. **被动重试**:`tenacity` 指数退避,`wait_exponential(min=4,max=60)`,最多 6 次,只重试 `openai.APIError` / HTTP 错误。
 **对应**:`app/embedding.py` `THROTTLE_SECONDS` + `_embed_batch_with_retry`。
-⚠️ chat 路径(`rewrite_query` / `_generate_answer`)目前**没接这层重试**,是裸调,撞 429/断连直接 502——技术债,生产要补。
+⚠️ chat 路径(`rewrite_query` / `_generate_answer`)与 rerank(httpx 调 `/v1/rerank`)目前**没接这层重试**,是裸调,撞 429/断连直接 502 或抛错——技术债,生产要补。
+
+### C2. Qwen3.5-4B 是思考模型,RAG 里怎么处理?
+它默认先吐一大段 `reasoning_content`(思考链)再给 `content`。RAG 生成设了 `max_tokens`,思考链会把额度吃光,导致 `content` 为空、`finish_reason=length`。所以三处 chat 调用(生成 / 流式生成 / 查询改写)都传 `extra_body={"enable_thinking": False}` 关掉思考——RAG 要的是基于 context 的直接答案,思考既费 token / 延迟又触发空响应 bug。
+**对应**:`retrieval.py` 的 `_generate_answer` / `_generate_answer_stream`、`chat.py` 的 `_rewrite_query`。
 
 ### D. 为什么全程 async?
 RAG 是**重 IO**的:embedding、检索、LLM 生成全是网络/磁盘等待。async 让单进程在等待时切去处理别的请求,**并发吞吐高**。SQLAlchemy 用 async engine,LLM 用 `AsyncOpenAI`(`await client.chat.completions.create` / `client.embeddings.create`),本地 rerank 是 CPU 同步任务所以丢进 `asyncio.to_thread` 避免阻塞事件循环。
