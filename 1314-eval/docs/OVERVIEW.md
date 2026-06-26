@@ -97,3 +97,26 @@
 | `answer_relevancy` | response ↔ user_input | 答案切不切题(需 embeddings) |
 | `context_recall` | retrieved_contexts ↔ reference | 该检索的有没有漏 |
 | `context_precision` | retrieved_contexts ↔ reference | 检索的准不准 / 排序 |
+
+## 四、Prompt A/B(05_prompt_ab.py)与一个关键教训
+
+把 prompt 版本化(`prompts/v1.json`/`v2.json`),用 `/query` 的 `system_prompt` 覆盖跑评测,分数挂到版本上对比。这是整套评测的"目的":改 prompt 用数字证明好坏。
+
+**v1 vs v2 的区别**:只差规则 5 加的一句——v2 多了"只回答问题所问的那一点,不要扯到无关概念"(治跑题)。其余一字不差。
+
+**实跑结果(各 1 次)**:
+
+```
+        faithfulness  relevancy  recall  precision
+v1        0.9722       0.8143     1.0     0.8704
+v2        0.9637       0.8094     1.0     0.9259   ← precision +0.056
+```
+
+**教训(比"谁赢"更重要):**
+
+1. **prompt 只改答案(response),不碰检索**。所以它只可能动含 response 的指标:`faithfulness`、`relevancy`。`recall`/`precision` 是 检索片段↔reference、不含 response → **prompt 动不了它们**,两版检索片段一模一样。
+2. 所以 v2 那个 **precision +0.056 不是 prompt 的功劳,是裁判噪声**(同样输入、不同次打分会飘)。`recall` 顶在 1.0 飘不动,正好当对照组。
+3. **拿这 0.056 当噪声尺子**:v2 真正能影响的 faithfulness(-0.008)、relevancy(-0.005)都比噪声小一个量级 → 等于没动。**单跑一次不能证明 v2 更好。**
+4. 严谨做法:① 改 prompt 只看 `faithfulness`/`relevancy`;② 每版跑 2-3 次取均值压过噪声,或用更难、跑题更吃亏的题。
+
+> 一句话:A/B 的真功课是**挑对指标 + 知道自己的噪声底**,别被一次跑分骗了。

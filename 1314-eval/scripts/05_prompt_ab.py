@@ -82,7 +82,7 @@ result = evaluate(
     metrics=[Faithfulness(), ResponseRelevancy(),
              LLMContextRecall(), LLMContextPrecisionWithReference()],
     llm=judge, embeddings=emb,
-    run_config=RunConfig(max_workers=1, timeout=600),
+    run_config=RunConfig(max_workers=5, timeout=600),
 )
 df = result.to_pandas()
 df["in_kb"] = in_kbs
