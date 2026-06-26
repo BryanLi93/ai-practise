@@ -306,13 +306,13 @@ def _record_token_usage(usage) -> None:
     metrics.record_usage(settings.chat_model, usage)
 
 
-async def _generate_answer(question: str, context: str, recent_messages: list[Message]) -> str:
+async def _generate_answer(question: str, context: str, recent_messages: list[Message], system_prompt: str | None = None) -> str:
     client = get_openai_client()
 
     response = await client.chat.completions.create(
         model=settings.chat_model,
         messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": system_prompt or SYSTEM_PROMPT},
             {"role": "user", "content": _build_user_prompt(question, context, recent_messages)},
         ],
         temperature=0.1,
@@ -401,7 +401,8 @@ async def query(
     question: str,
     search_query: str, # 改写的 question
     recent_messages: list[Message],
-    top_k: int = DEFAULT_TOP_K
+    top_k: int = DEFAULT_TOP_K,
+    system_prompt: str | None = None,
 ) -> QueryResult:
     """
     完整的 RAG 查询流程。
@@ -434,5 +435,5 @@ async def query(
     logger.info(content)
 
     # 4. 调 LLM 生成答案
-    answer = await _generate_answer(question, content, recent_messages)
+    answer = await _generate_answer(question, content, recent_messages, system_prompt)
     return QueryResult(answer=answer, sources=retrieved)

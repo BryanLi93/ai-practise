@@ -41,6 +41,10 @@ class QueryRequest(BaseModel):
         default=None,
         description="会话 id,不传则创建新会话",
     )
+    system_prompt: str | None = Field(
+        default=None,
+        description="覆盖默认 system prompt(评测做 prompt A/B 用);不传则用服务端默认",
+    )
 
 class Source(BaseModel):
     """检索到的 chunk 引用信息。"""

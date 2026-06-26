@@ -51,6 +51,7 @@ RERANK_SCORE = Histogram(
 # ---------- 成本(token × 单价)----------
 # 单价 = 每 1K token 的价格(单位:元 RMB)。⚠️ 占位示例,务必按硅基流动实际计费核对。
 MODEL_PRICES: dict[str, dict[str, float]] = {
+    "Qwen/Qwen3.5-9B": {"prompt": 0.0005, "completion": 0.004},   # 硅基流动真实单价(元/1K, 输入<128k 档)
     "Qwen/Qwen3.5-4B": {"prompt": 0.0, "completion": 0.0},        # ← 占位,按实际单价 / 1K token 改
     "BAAI/bge-m3": {"prompt": 0.0, "completion": 0.0},            # ← 占位,按实际单价 / 1K token 改
 }

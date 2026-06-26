@@ -21,9 +21,9 @@ ROOT = Path(__file__).resolve().parent.parent
 GOLDEN = json.loads((ROOT / "data" / "golden.json").read_text(encoding="utf-8"))["items"]
 REPORTS = ROOT / "reports"
 
-MODEL = "Qwen/Qwen3.5-4B"
-# 硅基流动单价(元 / 1M tokens)。占位示例,按实际计费改;小模型可能免费=0。
-PRICE = {"prompt": 0.0, "completion": 0.0}
+MODEL = "Qwen/Qwen3.5-9B"
+# 硅基流动 Qwen3.5-9B 真实单价(元 / 1K tokens, 输入 <128k 档)
+PRICE = {"prompt": 0.0005, "completion": 0.004}
 
 
 def read_tokens() -> tuple[int, int]:
@@ -50,7 +50,7 @@ for it in GOLDEN:
     latency_ms = round((time.perf_counter() - t0) * 1000)
     p1, c1 = read_tokens()
     prompt_tok, completion_tok = p1 - p0, c1 - c0
-    cost = (prompt_tok * PRICE["prompt"] + completion_tok * PRICE["completion"]) / 1_000_000
+    cost = prompt_tok / 1000 * PRICE["prompt"] + completion_tok / 1000 * PRICE["completion"]
     rows.append({
         "id": it["id"],
         "latency_ms": latency_ms,

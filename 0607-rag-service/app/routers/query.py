@@ -43,6 +43,7 @@ async def query_endpoint(
             req_conversation_id=request.conversation_id,
             req_question=request.question,
             req_top_k=request.top_k,
+            req_system_prompt=request.system_prompt,
         )
     except ConversationNotFound:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found")

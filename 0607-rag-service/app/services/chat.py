@@ -144,6 +144,7 @@ async def handle_chat(
     req_conversation_id: uuid.UUID | None,
     req_question: str,
     req_top_k: int,
+    req_system_prompt: str | None = None,
 ) -> QueryResponse:
     """
     多轮对话编排:解析会话 → 改写 → 检索生成 →(成功后)落库。
@@ -154,7 +155,9 @@ async def handle_chat(
     recent_messages, search_query = await _prepare(db, req_conversation_id, req_question)
 
     # 3. 检索 + 生成(无 DB 写入)
-    is_cacheable = not recent_messages
+    # 覆盖了 system_prompt(评测 A/B)时不走缓存:缓存键不含 prompt,
+    # 否则 v1/v2 同一问题会撞同一条缓存、读到对方的答案。
+    is_cacheable = not recent_messages and req_system_prompt is None
     cache_key = _answer_cache_key(req_question, req_top_k) if is_cacheable else None
 
     if cache_key:
@@ -171,6 +174,7 @@ async def handle_chat(
         search_query=search_query,
         recent_messages=recent_messages,
         top_k=req_top_k,
+        system_prompt=req_system_prompt,
     )
     sources = _build_sources(result.sources)
     sources_payload = [s.model_dump() for s in sources]
