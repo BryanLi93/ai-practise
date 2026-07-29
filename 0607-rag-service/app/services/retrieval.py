@@ -140,8 +140,7 @@ async def _retrieve_by_vector(
     )
     result = await db.execute(stmt)
     return {
-        chunk_id: rank
-        for rank, (chunk_id,) in enumerate(result.all(), start=1)
+        chunk_id: rank for rank, (chunk_id,) in enumerate(result.all(), start=1)
     }
 
 
@@ -173,8 +172,7 @@ async def _retrieve_by_keyword(
     """)
     result = await db.execute(sql, { "q": question, "k": limit })
     return {
-        row[0]: rank
-        for rank, row in enumerate(result.all(), start=1)
+        row[0]: rank for rank, row in enumerate(result.all(), start=1)
     }
 
 async def _rrf_fuse(
@@ -219,8 +217,7 @@ async def _load_chunks(
     )
     result = await db.execute(stmt)
     chunks_by_id = {
-        c.id: c
-        for c in result.scalars().all()
+        c.id: c for c in result.scalars().all()
     }
 
     retrieved = []

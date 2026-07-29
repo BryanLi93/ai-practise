@@ -51,7 +51,88 @@ graph TD
     Retrieval --> Gemini
 ```
 
-## 2. 文档入库时序图 (POST /upload)
+## 2. 技术方案作用图（复习版）
+
+这张图按真实请求链路组织。方框写“做什么”，连线写“为什么需要这项技术”；虚线表示日志和指标，不参与业务数据处理。
+
+```mermaid
+flowchart LR
+    User["用户<br/>Web UI / Swagger"]
+    SiliconFlow["SiliconFlow<br/>bge-m3：embedding<br/>BGE reranker：精排<br/>Qwen3.5-4B：生成 / 改写"]
+    Observe["可观测性<br/>structlog + trace_id：串联请求日志<br/>Prometheus /metrics：请求、延迟、token、召回、估算成本（单价待核对）"]
+
+    subgraph Compose["Docker Compose：统一启动和连接 app、PostgreSQL、Redis"]
+        subgraph App["FastAPI App"]
+            Router["HTTP / Router<br/>参数校验、异常转状态码、依赖注入"]
+
+            subgraph Ingest["文档入库"]
+                Parse["PyMuPDF / 文本解码<br/>PDF、txt、md → 纯文本"]
+                Split["RecursiveCharacterTextSplitter<br/>500 字符 / overlap 50"]
+                EmbedDoc["批量 embedding<br/>每批 ≤32 + 0.5s 节流 + 退避重试"]
+            end
+
+            subgraph Query["问答链路"]
+                Chat["对话编排<br/>最近 6 条历史、问题改写<br/>成功后一次事务保存"]
+                EmbedQuery["问题 embedding"]
+                Hybrid["混合召回<br/>向量 top 80 + 中文关键词 top 80"]
+                RRF["RRF 融合<br/>只比较名次，保留 20"]
+                Rerank["BGE rerank<br/>可选；当前默认关闭"]
+                TopK["最终 top_k<br/>默认 5"]
+                Generate["Qwen 生成<br/>只用 context + [n] 引用<br/>enable_thinking=False"]
+                Stream["SSE<br/>sources → token → done<br/>开流前先拉第一帧"]
+            end
+        end
+
+        PG[("PostgreSQL 16<br/>业务数据：documents / chunks / conversations / messages<br/>向量：pgvector halfvec(1024)，当前精确 KNN<br/>关键词：zhparser + tsvector + GIN")]
+        Redis[("Redis 7（best-effort）<br/>问题 embedding：TTL 7 天<br/>无历史首轮答案：TTL 1 小时<br/>故障时降级为未命中")]
+    end
+
+    User --> Router
+
+    Router -->|"POST /upload"| Parse
+    Parse --> Split --> EmbedDoc
+    EmbedDoc -->|"bge-m3"| SiliconFlow
+    EmbedDoc -->|"Document + Chunks<br/>flush 后一次 commit"| PG
+
+    Router -->|"POST /query<br/>POST /query/stream"| Chat
+    Chat <-->|"首轮答案缓存"| Redis
+    Chat -->|"改写后的 search_query"| EmbedQuery
+    EmbedQuery <-->|"问题向量缓存"| Redis
+    EmbedQuery -->|"未命中时调用 bge-m3"| SiliconFlow
+    EmbedQuery --> Hybrid
+    Hybrid <-->|"余弦距离 + ts_rank_cd"| PG
+    Hybrid --> RRF
+    RRF -->|"ENABLE_RERANK=True"| Rerank
+    Rerank -->|"远程 /v1/rerank"| SiliconFlow
+    Rerank --> TopK
+    RRF -->|"当前默认 False"| TopK
+    TopK --> Generate
+    Generate <-->|"Qwen chat completion"| SiliconFlow
+    Generate --> Chat
+    Chat -->|"user + assistant + sources"| PG
+    Chat --> Stream --> User
+
+    Router -.-> Observe
+    Chat -.-> Observe
+    Hybrid -.-> Observe
+
+    classDef external fill:#f5f5f5,stroke:#666,color:#222;
+    classDef data fill:#e8f4ff,stroke:#2878b5,color:#123;
+    classDef warning fill:#fff4d6,stroke:#c58a00,color:#432;
+    class SiliconFlow,Observe external;
+    class PG,Redis data;
+    class Rerank warning;
+```
+
+读图时重点记住：
+
+- PostgreSQL 不只是存数据，还同时负责向量检索和中文全文检索。
+- Redis 只减少重复调用，坏了可以绕过，不能拖垮主链路。
+- SiliconFlow 提供三个不同模型能力：embedding、rerank、生成/改写。
+- rerank 代码已经接好，但当前默认关闭；embedding 也还没有 HNSW 索引。
+- structlog 和 Prometheus 负责发现问题，不参与答案生成。
+
+## 3. 文档入库时序图 (POST /upload)
 
 ```mermaid
 sequenceDiagram
@@ -92,7 +173,7 @@ sequenceDiagram
     R-->>U: 201 UploadResponse
 ```
 
-## 3. 提问检索时序图 (POST /query)
+## 4. 提问检索时序图 (POST /query)
 
 ```mermaid
 sequenceDiagram
@@ -139,7 +220,7 @@ sequenceDiagram
     R-->>U: 201 QueryResponse
 ```
 
-## 4. 三段式检索漏斗 (数据量收敛)
+## 5. 三段式检索漏斗 (数据量收敛)
 
 ```mermaid
 graph LR
@@ -148,8 +229,10 @@ graph LR
     B --> D{RRF 融合}
     C --> D
     D -->|取 20| E[精排候选]
-    E -->|cross-encoder| F[Rerank top 5]
+    E -->|开启时 cross-encoder| F[Rerank top 5]
+    E -->|当前默认关闭| F2[直接取 top 5]
     F --> G[送入 LLM 的 context]
+    F2 --> G
 ```
 
-> 数字来源:`RERANK_CANDIDATES=20`,`CANDIDATES_MULTIPLIER=4` → 每路召回 20×4=80,RRF 后取 20,精排后取 `top_k`(默认 5)。
+> 数字来源:`RERANK_CANDIDATES=20`,`CANDIDATES_MULTIPLIER=4` → 每路召回 20×4=80,RRF 后取 20。`ENABLE_RERANK=True` 时精排后取 `top_k`;当前默认是 `False`,直接从 RRF 结果取 `top_k`(默认 5)。

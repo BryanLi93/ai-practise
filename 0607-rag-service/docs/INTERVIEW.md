@@ -1,172 +1,135 @@
-# 面试问答标准答案稿
+# RAG Service 面试复习稿
 
-> 每题结构:**一句话核心** → **展开** → **对应代码**。
-> 标 ⚠️ 的是"当前代码状态"的诚实提醒,被追问时别说成已经做了。
+这份文档只解决一件事：**面试时把项目讲清楚**。先记住主线，再准备追问；不用背代码行号，也不要把尚未完成的能力说成已经完成。
 
----
+## 30 秒介绍
 
-## 0. 电梯陈述(开场 30 秒)
+我做了一个可以上传资料、再基于资料回答问题的 RAG 服务。
 
-> 我做了一个完整的 RAG 问答服务,技术栈是 FastAPI + PostgreSQL/pgvector,LLM 走 **硅基流动(SiliconFlow)OpenAI 兼容接口**(chat 用 Qwen/Qwen3.5-4B,embedding 用 BAAI/bge-m3)。
-> 检索是**三段式**:召回用 pgvector 余弦距离加 zhparser 中文分词的 tsvector 做**混合检索**,用 **RRF** 融合两路(因为两路分数量纲不可比);精排用 **BGE-reranker-v2-m3** 这个 cross-encoder(走硅基流动 `/v1/rerank`)对 top 20 重排;生成用 Qwen/Qwen3.5-4B(思考模型,生成时关掉 `enable_thinking`),prompt 强约束"只基于 context 回答"并要求 `[n]` 引用标注做溯源。
-> 几个工程细节:embedding 用 bge-m3(固定 1024 维,远在 pgvector HNSW 2000 维上限内);PDF 解析用 PyMuPDF 加启发式去重复页眉页脚;限流用 **tenacity 退避 + 主动节流** 处理。
+文档会先被解析、分块并生成 embedding，然后存进 PostgreSQL 和 pgvector。用户提问时，系统同时使用向量检索和中文关键词检索，用 RRF 合并两路结果，再按需经过 rerank，最后让 Qwen 只根据检索到的内容生成带 `[n]` 引用的答案。
 
----
+除了基础问答，我还补了多轮对话、SSE 流式输出、Redis 缓存、结构化日志和 Prometheus 指标。这个项目的重点不是调用一个现成 RAG 框架，而是自己把入库、检索、生成和工程化链路串起来，理解每一步为什么这样做。
 
-## 1. 端到端:用户问一个问题,发生了什么?(必背)
+## 一、先把完整链路讲顺
 
-**核心**:向量化问题 → 混合召回 → RRF 融合 → 精排 → 拼 context → LLM 生成带引用的答案。
+### 1. 文档怎么进入知识库
 
-**展开(按时间顺序 6 步)**:
-1. **问题向量化** —— `embed_query` 调 `embeddings.create`(bge-m3,经硅基流动),得到 1024 维向量。当前是对称调用,query 和 document 用同一模型、不加 query/passage 前缀(bge-m3 本身支持非对称用法,这里没用)。
-2. **两路召回** —— 向量路按 `cosine_distance` 排序取 top 80;关键词路用 zhparser 把问题分词成 `词A | 词B` 的 OR 查询,按 `ts_rank_cd` 排序取 top 80。各自返回 `{chunk_id: 名次}`。
-3. **RRF 融合** —— 对两路并集里每个 chunk 算 `score = Σ 1/(60+rank)`,降序取前 20。
-4. **精排** —— (开启时)调硅基流动 `/v1/rerank`(BGE cross-encoder)把 query 和每个 chunk 成对打分,按分数重排取 top_k;httpx 异步调用,返回的乱序结果按 index 对齐回输入顺序。
-5. **拼 context** —— 把 chunk 编号成 `[1] ... [2] ...`。
-6. **生成** —— Qwen/Qwen3.5-4B(`chat.completions.create`,`extra_body={"enable_thinking": False}` 关思考链),system 消息强约束只用 context、强制 `[n]` 标注、找不到就明说;`temperature=0.1` 降低发挥。最后路由层把 chunks 组装成带 `similarity` 和引用编号的 `sources` 数组一起返回。
+1. 上传接口先检查文件类型和大小，支持 txt、Markdown 和 PDF。
+2. PDF 用 PyMuPDF 提取文本，并尝试删除重复页眉页脚。
+3. 文本按自然边界切成约 500 字符的 chunk，超长内容切分时保留 50 字符 overlap。
+4. 每个 chunk 调 `BAAI/bge-m3` 生成 1024 维 embedding。
+5. `Document` 和全部 `Chunk` 在一个事务里写入 PostgreSQL；chunk 同时保存向量和由 zhparser 生成的中文全文检索字段。
 
-**对应代码**:`app/services/retrieval.py` 的 `query()` 函数。
+代码入口：[upload.py](../app/routers/upload.py)、[ingest.py](../app/services/ingest.py)、[chunking.py](../app/chunking.py)。
 
----
+### 2. 用户提问后发生什么
 
-## 2. 为什么 embedding 列用 halfvec(1024) 而不是 vector(1024)?
+假设用户上一轮问的是“RRF 是什么”，这一轮只问“那为什么不直接把分数相加？”：
 
-**核心**:维度由模型(bge-m3)定死为 1024;`halfvec` 半精度比 `vector` 省一半存储。
+1. 系统先读取最近 6 条消息，把当前问题改写成能独立检索的完整问题，例如“RRF 为什么不直接把向量分数和关键词分数相加？”第一轮没有历史时跳过改写。
+2. 如果是无历史的首轮问题，先检查答案缓存；未命中再继续。
+3. 用改写后的问题生成 embedding，再分别执行向量检索和中文关键词检索。
+4. 两路各取最多 80 个候选，只保留名次，不直接混合原始分数。
+5. 用 RRF 合并排名并取前 20 个候选；如果开启 rerank，再精排到最终 `top_k`，默认是 5。
+6. 把最终 chunk 编成 `[1]`、`[2]`，连同用户原话交给 Qwen 生成答案。
+7. 响应同时返回答案和 `sources`。答案里的 `[n]` 对应 `sources[n-1]`，前端可以展示原文。
+8. RAG 成功后，才把用户问题、答案和来源一次性写入会话。
 
-**展开**:
-- pgvector 的 HNSW 索引维度上限是 2000,超了就建不了近似索引、只能全表暴力扫。所以目标维度要 ≤2000。
-- 现用 `BAAI/bge-m3`,**固定输出 1024 维**,远在上限内、本就不用截断;bge-m3 不支持 `dimensions` 参数(没有 MRL 截断那一手),维度由模型定死,数据库列宽必须跟着它走。
-- `halfvec` 用 16 位半精度存,比 `vector`(32 位)**省一半空间和内存带宽**,对召回精度几乎无影响。
+这里有一个容易讲错的点：**改写后的问题只用于检索，生成答案仍使用用户原话和历史。** 改写是为了让无状态的检索器看懂指代，不应该替代用户真正问的问题。
 
-**对应代码**:`app/models.py` `HALFVEC(settings.embedding_dim)`(=1024);`app/embedding.py` `embeddings.create(...)` **不传** `dimensions`(bge-m3 固定维度)。
+代码入口：[chat.py](../app/services/chat.py)、[retrieval.py](../app/services/retrieval.py)。
 
-⚠️ **诚实提醒**:1024 维是 `bge-m3` 定死的(正好 ≤2000,可建 HNSW),但当前代码 `init_db` 只建了 tsvector 的 GIN 索引,**embedding 列还没真正建 HNSW**,所以现在向量检索其实是暴力精确 KNN(小知识库够用)。被追问"那你建索引了吗",就说:"目前数据量小走的精确 KNN,加索引是一行 `Index(..., postgresql_using='hnsw', ...)` 的事。"
+## 二、高频追问
 
----
+### 1. 为什么同时做向量检索和关键词检索
 
-## 3. Asymmetric vs Symmetric embedding(原 task_type 问题)
+两种检索解决的是不同问题。
 
-**核心**:**非对称** embedding 给"文档"和"查询"分别优化向量空间(更易匹配,召回略升);**对称** 两边同一编码。**我现在用 `bge-m3`,但走硅基流动接口是对称调用(不加 query/passage 前缀)**,所以 `embed_documents` 和 `embed_query` 只差"批量 vs 单条"。
+向量检索擅长找“意思相近”的内容。用户问“怎么避免模型乱编”，正文写“降低幻觉”，即使没有相同词语也可能召回。但它对型号、缩写、代码名这类精确词不一定敏感。
 
-**展开**:非对称是不少检索模型的设计——Gemini 的 `task_type=RETRIEVAL_DOCUMENT/QUERY`、BGE 的 query/passage、E5 的 `"query:"/"passage:"` 前缀。被追问"你区分 query 和 doc 吗":现在用的就是 `bge-m3`,它本身支持 query/passage,但当前没加前缀、是对称用;想再榨点召回可以加角色前缀。
+关键词检索正好相反。它能准确命中 `halfvec`、`RRF_K` 这类词，却不理解换一种说法后的语义。
 
-**对应代码**:`app/embedding.py` 的 `embed_documents` vs `embed_query`。
+所以项目让两路先各自宽召回，再合并结果。这样不是为了追求复杂，而是让两种检索互相补漏。
 
----
+### 2. 为什么用 RRF，后面还要 rerank
 
-## 4. db.flush() 和 db.commit() 的差别?为什么 ingest 里用 flush?
+向量检索返回的是余弦距离，关键词检索返回的是 `ts_rank_cd`，两种分数的范围和含义不同，直接相加没有可靠标准。
 
-**核心**:`flush` 把 SQL 发给数据库但**不结束事务**,`commit` 才真正提交并结束事务。
+RRF 不比较原始分数，只看某个 chunk 在两路里排第几。一个 chunk 如果两路排名都靠前，融合后自然也会靠前。这种做法简单，也不用先为两路分数设计归一化规则。
 
-**展开**:
-- ingest 里先 `add(document)` 再 `flush()`,目的是**触发 INSERT 拿到自增主键 `document.id`**,因为后面建 chunks 需要这个外键。
-- 但此时**不能 commit** —— 如果接下来插入 chunks 失败,整个事务(document + chunks)要**一起回滚**,不能留一个没有任何 chunk 的孤儿 document。
-- 所以流程是:`add(doc)` → `flush()`(拿 id)→ `add_all(chunks)` → `commit()`(一次性提交)。
+RRF 仍然只是对两份粗排结果做融合。rerank 会把问题和候选 chunk 放在一起判断相关性，精度更高，但计算更贵、也不能预先建索引，所以只适合处理前 20 个候选，不能扫描整个知识库。
 
-**对应代码**:`app/services/ingest.py:77` flush,`:90` commit。
+一句话总结：**召回负责别漏掉，rerank 负责把最相关的排到前面。**
 
----
+### 3. 为什么使用 `halfvec(1024)`
 
-## 5. RAG 的"幻觉"怎么产生的?prompt 怎么约束?
+1024 维不是自己拍脑袋定的，而是 `bge-m3` 的固定输出维度。数据库列宽必须和模型输出一致；以后更换 embedding 模型时，旧向量不能继续使用，需要全部重新生成。
 
-**核心**:幻觉来自 LLM 用**参数里的记忆**而非 context 回答;我们用强约束 system prompt 把它"焊死"在 context 上。
+选择 `halfvec` 是为了用半精度保存向量，减少存储和内存开销。当前知识库规模较小，还没有创建 HNSW 索引，向量检索走的是精确 KNN。这个状态面试时要如实说明。
 
-**展开 —— prompt 的四道闸**:
-1. **只许用 context** —— "只能使用下方上下文中的信息回答"。
-2. **强制引用标注** —— 每个事实后面必须跟 `[n]`,给了正反例。这既是溯源,也**反向迫使模型逐句回到原文**对照,减少编造。
-3. **兜底拒答** —— 找不到就回固定话术"没有找到相关内容",不许用常识。
-4. **低温度** —— `temperature=0.1` 减少自由发挥。
+### 4. 怎么减少幻觉，引用又是怎么实现的
 
-另外召回层也在防幻觉:召回不到任何 chunk 时直接返回 `NO_CONTEXT_ANSWER`,根本不调 LLM。
+项目做了三层限制：
 
-**对应代码**:`app/services/retrieval.py:38` SYSTEM_PROMPT;`:334` 空召回兜底。
+1. 没有召回到 chunk 时直接返回固定拒答，不调用 LLM。
+2. system prompt 要求模型只能使用当前 context，信息不足就明确说找不到。
+3. 每条事实后必须标 `[n]`，后端按同样的顺序返回 `sources`，让前端能展示对应原文。
 
----
+引用能提高可核查性，但不能自动证明答案正确。模型仍可能“编号写对了，内容却没有被原文支持”。真正判断忠实度需要评测集和 Ragas 一类评测工具；这个项目目前只有手动检索验证脚本，还没有完成 Ragas 评测闭环。
 
-## 6~10. 检索策略五连问(混合检索的核心逻辑)
+### **5. 多轮对话为什么要先改写问题**
 
-这五题是一条逻辑链,**连起来背**最有说服力:
+检索器只看到当前输入，不知道“它”“这个方法”指什么。系统会结合最近历史，把含指代的问题改成独立问题，再拿去检索。
 
-### 6. 为什么不只用向量?——**关键词盲区**
-向量擅长语义,但对**精确词、专有名词、型号、缩写、代码符号**不敏感。比如问 "halfvec",向量可能召回一堆"向量存储"的泛泛内容,却漏掉真正写 `halfvec` 那段。
+历史记录只帮助理解问题，不能充当知识来源。旧答案里的 `[1]`、`[2]` 会在拼 prompt 前删掉，避免和本轮新来源编号冲突。最终生成仍使用用户原话，因为改写可能丢失语气或误解意图。
 
-### 7. 为什么不只用关键词?——**语义盲区**
-关键词(tsvector)只能字面匹配,**换个说法就召不回**。问"怎么防止模型乱编",正文写的是"缓解幻觉",字面不重合,关键词路直接漏掉,而向量能命中。
+### 6. 为什么 RAG 成功后才写会话
 
-### 8. 为什么要 RRF,不直接把两路分数相加?——**量纲不可比**
-向量路是**余弦距离**,关键词路是 **ts_rank_cd**,两个分数的尺度、分布完全不同,直接相加是"拿苹果加橘子"。RRF 只用**名次**:`score = Σ 1/(60+rank)`,把两路统一到同一标准,既鲁棒又不需要调参归一化。那个 `+60`(RRF_K)是平滑常数,削弱头部名次的过度主导。
+如果先创建会话、再调用 embedding 和 LLM，那么外部服务一旦失败，数据库里会留下空会话或半条记录。
 
-### 9. 既然混合检索了,为什么还要 Rerank?——**召回精度有上限**
-召回用的是**双塔(bi-encoder)**:query 和 doc **分开**编码,牺牲精度换速度,只能算"大致相关"。**cross-encoder** 把 query 和 doc **拼在一起**送进模型做交叉注意力,能判断细粒度相关性,精度高得多。所以用它对召回出来的 20 个做精排。
+当前流程先读取历史、改写、检索和生成；全部成功后，再创建会话并写入 user、assistant 两条消息，最后只 `commit` 一次。这样一次问答要么完整保存，要么完全不保存。
 
-### 10. 那为什么不直接全用 Rerank?——**算不动**
-cross-encoder 每个 (query, doc) 对都要跑一次完整前向,**没法预先建索引**,全库几万 chunk 每次查询都重算根本不现实。所以是**漏斗**:便宜的召回从全库筛到 20,贵的精排只处理这 20 个。
+同样的原则也用在文档入库：先 `flush` 拿到 `document.id`，但不结束事务；chunk 全部写好后再 `commit`。`flush` 是把 SQL 发给数据库，`commit` 才是正式提交。
 
-**对应代码**:`_hybrid_retrieve` / `_rrf_fuse` / `_rerank_chunks` 在 `app/services/retrieval.py`。
+### 7. SSE 流式输出最难处理的是什么
 
-⚠️ **诚实提醒**:`ENABLE_RERANK` 当前是 `False`(retrieval.py:35),默认走 RRF 后直接截断。演示前改成 `True`,或者大方说"这是个可开关的对比实验,默认关掉是为了省一次 rerank API 往返与费用"。
+有两个边界问题。
 
----
+第一，异步生成器是惰性的。调用生成器函数时，函数体还没有执行；如果直接交给 `StreamingResponse`，FastAPI 可能先发出 HTTP 200，之后才发现会话不存在。项目会在开流前手动拉取第一帧，让会话校验和检索错误还能正常返回 404 或 502。开流后的生成错误则只能作为 SSE `error` 帧发送。
 
-## 附加高频追问(面试官大概率会问)
+第二，网络分块不等于 SSE 消息边界。前端必须持续缓冲字节，使用 `TextDecoder(..., {stream: true})` 处理可能被切开的中文，再按 `\n\n` 拆出完整事件，不能每收到一个网络块就立刻 `JSON.parse`。
 
-### A. chunk_size 500、overlap 50 怎么定的?
-单位是**字符数**不是 token。500 字符中英混合大约 100~700 token,远低于 bge-m3 的 8192 token 上限,语义也够完整。overlap 50 防止**句子在 chunk 边界被切断**导致语义丢失。用 `RecursiveCharacterTextSplitter`,分隔符从粗到细(段落→行→中英句末标点→…),优先在自然边界切。
-⚠️ 注意:overlap 只在"单个超长段落被迫切碎"时才生效;原始段落都小于 chunk_size 时走纯合并路径,相邻块之间没有 overlap(chunking.py:82 注释)。
+### 8. 缓存和可观测性做了什么
 
-### B. 中文检索怎么处理的?
-PostgreSQL 默认不分中文词。我在 Docker 镜像里**自己编译了 SCWS + zhparser**,建了 `chinese_zh` 文本搜索配置,把名词/动词/形容词等词性映射成可检索词。`chunks.content_tsv` 是 `Computed` 列,DB 自动用 `to_tsvector('chinese_zh', content)` 生成,配 GIN 索引。
-**对应**:`docker/postgres/Dockerfile` + `init-extensions.sql` + `models.py:45`。
+Redis 里有两类缓存：
 
-### C. 限流怎么扛的?两层
-1. **主动节流**:`embed_documents` 批之间 `sleep`,节流值随 provider 变——Gemini free tier 要 13s(~5 RPM),现在走硅基流动宽松,降到 0.5s(批大小也压到硅基流动上限 32 条/请求)。
-2. **被动重试**:`tenacity` 指数退避,`wait_exponential(min=4,max=60)`,最多 6 次,只重试 `openai.APIError` / HTTP 错误。
-**对应**:`app/embedding.py` `THROTTLE_SECONDS` + `_embed_batch_with_retry`。
-⚠️ chat 路径(`rewrite_query` / `_generate_answer`)与 rerank(httpx 调 `/v1/rerank`)目前**没接这层重试**,是裸调,撞 429/断连直接 502 或抛错——技术债,生产要补。
+- embedding 缓存保存 7 天，key 包含模型、维度和文本哈希，避免换模型后读到旧向量。
+- 答案缓存只用于没有历史的首轮问题，保存 1 小时。多轮问题依赖上下文，不能只按当前问题缓存。
 
-### C2. Qwen3.5-4B 是思考模型,RAG 里怎么处理?
-它默认先吐一大段 `reasoning_content`(思考链)再给 `content`。RAG 生成设了 `max_tokens`,思考链会把额度吃光,导致 `content` 为空、`finish_reason=length`。所以三处 chat 调用(生成 / 流式生成 / 查询改写)都传 `extra_body={"enable_thinking": False}` 关掉思考——RAG 要的是基于 context 的直接答案,思考既费 token / 延迟又触发空响应 bug。
-**对应**:`retrieval.py` 的 `_generate_answer` / `_generate_answer_stream`、`chat.py` 的 `_rewrite_query`。
+缓存采用 best-effort：Redis 故障时按未命中处理，主问答链路继续运行。
 
-### D. 为什么全程 async?
-RAG 是**重 IO**的:embedding、检索、LLM 生成全是网络/磁盘等待。async 让单进程在等待时切去处理别的请求,**并发吞吐高**。SQLAlchemy 用 async engine,LLM 用 `AsyncOpenAI`(`await client.chat.completions.create` / `client.embeddings.create`),本地 rerank 是 CPU 同步任务所以丢进 `asyncio.to_thread` 避免阻塞事件循环。
+可观测性方面，每个请求都有 `trace_id`，结构化日志可以串起同一次请求；Prometheus 记录请求量、延迟、token、候选数量和 rerank 分数。当前只做到请求级耗时，还不能直接看出慢在改写、检索还是生成。
 
-### E. 引用溯源怎么实现的?
-两端配合:**prompt 强制** LLM 在答案里写 `[n]`;**路由层**把检索到的 chunks 按相同顺序组装成 `sources` 数组,每个带 `chunk_id / document_filename / chunk_index / similarity / vector_rank / keyword_rank / rerank_score`。前端用 `[n]` 编号对回 `sources[n-1]`。
-⚠️ `similarity` 是从 RRF score 派生的 UI 友好分(`min(1, score*30)`,retrieval.py:84),不是真正的余弦相似度,被问到要讲清楚。
+### 9. 为什么主要使用 async
 
-### F. 异常处理 / 安全?
-- 全局异常 handler 兜底,**不把 stacktrace 泄露**给客户端,只回类型名(main.py:55)。
-- 上传做白名单校验 + 大小限制(30MB)。
-- 已知业务异常(空内容)→ 4xx,未知异常 → 5xx + 记完整日志。
+embedding、数据库检索、rerank API 和 LLM 生成大部分时间都在等待网络或数据库。使用 async 后，一个请求在等待时，事件循环可以继续处理其他请求，提高单进程并发能力。
 
-### G. 日志和可观测性怎么做的?trace_id 怎么贯穿一次请求?
+async 不会让一次 LLM 调用本身更快，它提高的是并发等待时的资源利用率。
 
-**核心**:结构化 JSON 日志(structlog)+ 每个请求一个 trace_id 串起全链路日志;trace_id 靠 `contextvars`(异步版的 thread-local)隐式贯穿调用链,并发请求互不串号。
+## 三、当前实现必须诚实说明
 
-**展开**:
-- **结构化**:日志不拼字符串,而是"事件名 + 字段"(`log.info("retrieval_done", candidates=20)`),经 structlog 的 processor 管道渲染 —— 本地彩色、生产 JSON(`LOG_JSON` 切换),JSON 能被 `jq` / 日志系统按字段查询。
-- **统一管道**:structlog 的 `ProcessorFormatter` 把标准库 logging 也接管过来,sqlalchemy / openai 等第三方库日志走同一格式。(uvicorn 自带 logging 且与 `--reload` 多进程有时序冲突,单独留它原生格式,用中间件自打的请求日志替代它的 access log。)
-- **trace_id 机制(重点)**:中间件入口 `bind_contextvars(trace_id=...)` 发号,本次请求里所有日志的 `merge_contextvars` 自动取到它,结束 `clear_contextvars()` 收号。**为什么并发不串号**:`ContextVar` 的值存在"每个 asyncio Task 自己的 Context"里,不是全局变量;`await` 切协程时事件循环连 Context 一起切,所以 A 读到 A 的、B 读到 B 的。用全局变量则会被后到的请求覆盖(串号)。
-- **请求级 timing + 透传**:中间件每请求打一条 `request_completed`(method/path/status/elapsed_ms/trace_id),响应头回传 `X-Trace-Id`;客户端报错时给你这个 id,一条 `jq 'select(.trace_id==...)'` 就捞出整次请求。上游已带 `X-Trace-Id` 则沿用(跨服务串联),否则自己生成。
+- `ENABLE_RERANK = False`，默认没有执行 rerank；现在是 RRF 后直接取前 `top_k`。
+- embedding 列没有 HNSW 索引，小数据量下使用精确 KNN；数据变大后查询会变慢。
+- 向量检索和关键词检索目前是先后执行，并没有真正并行。
+- `similarity` 是把 RRF 分数放大后的 UI 展示值，不是真实余弦相似度。
+- embedding 有重试；chat 和 rerank API 还没有重试，遇到 429 或网络波动会直接失败。
+- 答案缓存只靠 1 小时 TTL。上传新文档后不会主动失效，期间可能返回旧答案。
+- 成本指标里的部分模型单价还是占位值，不能当作真实账单。
+- PDF 只支持提取文本层，扫描件没有 OCR。
 
-**延伸(被深问时)**:这是单服务版;分布式追踪扩成 trace_id + span_id,用 W3C `traceparent` 头跨服务透传,行业标准实现是 OpenTelemetry —— 我们的中间件是它的极简版。
+## 四、复习时只记这四句话
 
-**对应代码**:`app/logging_config.py`(structlog 管道 + 桥接 stdlib);`app/main.py` 的 `trace_context_middleware`。
-
-⚠️ **诚实提醒**:只做了**请求级**耗时;原计划的 service 内**分段 timing**(rewrite / retrieve / generate 各段)和**细粒度异常状态码映射**(401/403/429/503 等)没做(query.py 现有 404/502 翻译够用)。被追问"能定位慢在哪一段吗",答:"目前到请求级,分段打点是下一步 —— 在 chat.py / retrieval.py 关键调用前后加 `log.info` + 计时即可。"
-
----
-
-## 当前状态待办(改进项,主动说反而加分)
-
-| 项 | 现状 | 一句话改进 |
-|---|---|---|
-| HNSW 索引 | 未建,向量走暴力 KNN | `models.py` 给 embedding 加 HNSW Index |
-| Rerank | `ENABLE_RERANK=False` | 默认开启或做成请求参数 |
-| 两路召回 | 顺序 await(注释写"并行") | `asyncio.gather` + 各自独立 session 真并发 |
-| ~~embedding 模型硬编码~~ | ✅ 已改读 `settings.embedding_model/_dim`(迁 OpenAI 时一并做了) | — |
-| chat 无重试 | `rewrite_query`/`_generate_answer` 裸调 | 仿 embedding 接 tenacity 退避(`openai.APIError`) |
-| 评测 | 无 | 接 Ragas 做召回率/忠实度评测 |
-
-> 面试时**主动讲这些**比被问出来强:说明你 review 过自己的代码、知道生产级和当前版本的差距在哪。
+1. 文档经过解析、分块和 embedding 后，进入 PostgreSQL/pgvector。
+2. 查询通过“向量 + 中文关键词”宽召回，用 RRF 合并，按需 rerank。
+3. LLM 只能根据最终 context 生成答案，并用 `[n]` 对应返回的来源。
+4. 多轮、流式、缓存和监控都是围绕这条主链路补上的工程能力。

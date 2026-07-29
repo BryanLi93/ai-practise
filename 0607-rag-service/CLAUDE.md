@@ -77,16 +77,12 @@
 
 ## 3. 已确定的技术决策(标题索引)
 
-> 完整理由在 `docs/DECISIONS.md`(项目核心知识点 + 面试考点)。这里只列标题,用到某条按编号去查。
+> 完整理由在 `docs/DECISIONS.md`。这里只列主题,需要时按同名标题查找。
 
-- **向量与存储**:1 维度 1024(bge-m3 固定输出,无 MRL / dimensions 参数)/ 2 halfvec 而非 vector / 3 维度是数据库的契约
-- **Embedding 调用**:4 用硅基流动 OpenAI 兼容接口(见 41)/ 5 bge-m3 当前对称使用,未加 query/passage 前缀(对称 vs 非对称仍是考点)/ 6 限流处理(批量 ≤32+节流 0.5s+退避)/ 7 chat/embedding 阻塞调用 await;rerank 改走 API 后是异步网络调用直接 await(不再 asyncio.to_thread)
-- **Provider**:41 走硅基流动 OpenAI 兼容接口(chat=Qwen/Qwen3.5-4B / embedding=BAAI/bge-m3 / rerank=BAAI/bge-reranker-v2-m3;chat+embedding 用 openai SDK,rerank 用 httpx)
-- **检索(三段式)**:8 pgvector 而非 ChromaDB / 9 tsvector+GIN 而非 rank_bm25 / 10 中文分词 zhparser / 11 content_tsv 用 Generated Column / 12 OR 风格+ts_rank_cd / 13 RRF 而非加权求和 / 14 召回候选=top_k×4 / 15 三段式架构 / 16 Rerank 用 BGE(经 SiliconFlow /v1/rerank API)而非 Cohere / 17 Bi-encoder vs Cross-encoder / 18 三个常量的漏斗
-- **生成**:19 system_instruction 参数 / 20 temperature=0.1 / 21 强 prompt+few-shot / 22 chunks 用 `---` 分隔
-- **引用溯源**:23 `[n]`+sources 数组 / 24 难点是引用正确性(faithfulness)
-- **多轮对话**:25 服务端持有历史 / 26 Conversation UUID、Message int / 27 按 id 排序不按 created_at / 28 sources_json 用 JSONB / 29 存取闭环 / 30 Query Rewriting(Day 2 已完成)/ 31 历史滑动窗口 / 39 检索用改写句·生成用原话 / 40 写库放 RAG 之后·单事务
-- **通用 Python/工程**:32 pydantic-settings 配置 / 33 flush vs commit / 34 selectinload 避免 N+1 / 35 外键显式 index=True / 36 Text vs String(n) / 37 service/router 分层 / 38 全局异常处理器
+- **数据与向量**:PostgreSQL 统一存储 / bge-m3 1024 维 + halfvec / 500 字符分块
+- **检索与生成**:向量 + 中文关键词 + RRF / 可选 rerank / prompt + `[n]` 来源编号
+- **多轮与事务**:改写句用于检索、用户原话用于生成 / RAG 成功后单事务保存
+- **工程能力**:SSE 流式协议 / Redis 可降级缓存 / structlog + Prometheus + Docker Compose
 
 ---
 
@@ -126,7 +122,9 @@
 │       └── conversation.py      # 会话 CRUD + add_message
 ├── docs/                        # 学习者自建的复习材料
 │   ├── ARCHITECTURE.md          # 分层架构图 + 时序图(Mermaid)
-│   └── INTERVIEW.md             # 面试问答标准答案稿(⚠️ 标注"当前代码状态"诚实提醒)
+│   ├── DECISIONS.md             # 核心选型、理由和代价
+│   ├── INTERVIEW.md             # 面试口述主线、高频追问和当前真实状态
+│   └── PITFALLS.md              # 影响正确性、事务或流式协议的复盘
 └── scripts/
     ├── init_db.py               # create_all 建表
     ├── test_embedding.py / test_chunking.py / test_ingest.py / test_retrieval.py  # 手动验证脚本
@@ -138,7 +136,7 @@
 **校准说明(相对旧交接文档)**
 - 旧文档列的 `scripts/seed_test_data.py` 和 `scripts/test_e2e.py` **目前不存在**,需要时再建。
 - 旧文档提到的顶层 `tests/`(pytest e2e)**尚未创建**,当前验证靠 `scripts/test_*.py` 手动脚本。
-- `docs/ARCHITECTURE.md`、`docs/INTERVIEW.md` 是新增的学习材料,旧文档未收录。
+- `docs/` 下的架构、技术决策、面试和易错点文档是新增的学习材料,旧文档未收录。
 
 ### 数据模型概要
 - `documents`(id, filename, content_type, byte_size, created_at)→ 1:N → `chunks`
@@ -178,7 +176,7 @@
   - `services/retrieval.py` 的 `query()` 解耦:`search_query`(改写句)走检索,`question`(原话)+ `recent_messages` 走生成;`_generate_answer` 拼历史进 prompt(`re.sub` 去旧引用编号),`SYSTEM_PROMPT` 加规则 6 声明历史非引用源
   - `routers/query.py` 瘦身成"调 handle_chat + 翻译异常(404/502)"
   - 单事务:写库全部移到 RAG 成功之后,`create_conversation(commit=False)` 只 flush 拿 id,末尾一次 `db.commit()`;修掉"RAG 失败留空会话"
-  - 易错点记录见 `docs/PITFALLS.md`(P1–P9)
+  - 易错点记录见 `docs/PITFALLS.md` 第 1–4 节
 - **Day 3(简单前端)— 已完成**:
   - 新增 `web/index.html`(纯 HTML + vanilla JS,无构建/无框架):三栏布局 = 上传+会话列表 / 对话气泡+输入 / 引用侧栏
   - 内置极简 Markdown 渲染器(不依赖 CDN);答案 `[n]` 可点击联动右侧来源高亮
@@ -191,13 +189,13 @@
   - `routers/query.py`:新增 `POST /query/stream`,`_sse()` 把帧编码成 `data: {json}\n\n`;**先手动 `await agen.__anext__()` 取第一帧**,把"开流前错误"(会话不存在→404 / 检索失败→502)与"开流后错误"(生成中途→error 帧)分开——开流后 HTTP 200 已发,状态码改不了。
   - `web/index.html`:`streamQuery()` 用 `fetch` + `ReadableStream` 读流(POST 带 body 不能用 EventSource),`TextDecoder({stream:true})` + 按 `\n\n` 缓冲切帧;`sendMessage` 改成 sources 先渲染、token 累积重渲染 markdown。
   - 帧协议:`sources`(1)→ `token`(N)→ `done`(带 conversation_id)。语义帧(dict)与 SSE 编码**分层**:chat 层产 dict,router 层编码字节。
-  - 验证:`curl -N /query/stream` 见三段逐步到达;库里 user+assistant 两条消息确认写入(流式单事务闭环成立)。易错点见 `docs/PITFALLS.md`(P10–P14)。
+  - 验证:`curl -N /query/stream` 见三段逐步到达;库里 user+assistant 两条消息确认写入(流式单事务闭环成立)。易错点见 `docs/PITFALLS.md` 第 5–6 节。
 - **Day 5(结构化日志)— 已完成(最小实现)**:
   - 新增 `app/logging_config.py`:structlog processor 管道(`merge_contextvars` → `add_logger_name` → `add_log_level` → `TimeStamper` → 渲染器);用 `ProcessorFormatter` 桥接标准库 logging,sqlalchemy/openai 等第三方库日志并入同一管道;`settings.log_json` 切 dev 彩色(`ConsoleRenderer`)/ prod JSON(`JSONRenderer`)。
   - `config.py` 加 `log_json: bool=False`;`requirements.txt` 加 `structlog`;`main.py` 把 `logging.basicConfig` 换成 `configure_logging()` + `logger=structlog.get_logger()`,日志调用改 event+字段风格。
   - `main.py` 加 `trace_context_middleware`:入口 `bind_contextvars(trace_id=上游 X-Trace-Id or uuid4().hex[:12])`,出口打 `request_completed`(method/path/status/elapsed_ms)+ 响应头 `X-Trace-Id`,`finally` `clear_contextvars`;全局异常响应体带 `trace_id`。
   - 新增 `scripts/test_logging.py`(一次运行展示桥接前后对比);trace_id 注入/清理已验证。
-  - ⚠️ **取舍(最小实现)**:uvicorn 自带 logging 未统一(强行收编与 `--reload` 时序冲突导致日志重复,故放弃,用中间件请求日志替代 access log);只做请求级 timing,**service 内分段 timing 与细粒度异常状态码映射未做**。面试稿见 `docs/INTERVIEW.md` 条目 G。
+  - ⚠️ **取舍(最小实现)**:uvicorn 自带 logging 未统一(强行收编与 `--reload` 时序冲突导致日志重复,故放弃,用中间件请求日志替代 access log);只做请求级 timing,**service 内分段 timing 与细粒度异常状态码映射未做**。面试稿见 `docs/INTERVIEW.md` 的“缓存和可观测性”及“当前实现必须诚实说明”。
 - **Day 6(基础监控)— 已完成(最小实现)**:
   - 新增 `app/metrics.py`:`prometheus_client` 定义 5 个指标 —— `rag_http_requests_total`(Counter,method/path/status)、`rag_http_request_duration_seconds`(Histogram,桶到 30s)、`rag_llm_tokens_total`(Counter,model/type)、`rag_retrieval_candidates`(Histogram)、`rag_rerank_score`(Histogram)。
   - `main.py`:`trace_context_middleware` 内接请求指标(用 `scope["route"].path` 当 label 避免高基数,early-return 跳过 /metrics 自身);`app.mount("/metrics", make_asgi_app())` 暴露端点(pull 模型)。
@@ -235,8 +233,8 @@
 |---|---|---|
 | ~~Day 2~~(已完成) | Query Rewriting + 历史注入 | ✅ 已实现:`get_recent_messages` → `rewrite_query` → 解耦 search_query/question → 历史进生成 prompt → `handle_chat` 编排 + 单事务。详见第 5 节与 `docs/PITFALLS.md` |
 | ~~Day 3~~(已完成) | 简单前端 | ✅ `web/index.html` 三栏(上传/对话/引用),内置 Markdown 渲染,挂在 `/ui`。详见第 5 节 |
-| ~~Day 4~~(已完成) | 流式输出 | ✅ SSE + `StreamingResponse` + `chat.completions.create(stream=True)` + 前端 `fetch` ReadableStream。拆 `retrieve`/`generate_stream`,先拉一帧分段错误处理。详见第 5 节与 `docs/PITFALLS.md`(P10–P14) |
-| ~~Day 5~~(已完成) | 结构化日志 | ✅ structlog JSON 管道 + 桥接 stdlib + `trace_context_middleware`(trace_id/contextvars)+ 请求级 timing。⚠️ 最小实现:uvicorn 未统一、无分段 timing、无细粒度异常映射。详见第 5 节与 `docs/INTERVIEW.md` 条目 G |
+| ~~Day 4~~(已完成) | 流式输出 | ✅ SSE + `StreamingResponse` + `chat.completions.create(stream=True)` + 前端 `fetch` ReadableStream。拆 `retrieve`/`generate_stream`,先拉一帧分段错误处理。详见第 5 节与 `docs/PITFALLS.md` 第 5–6 节 |
+| ~~Day 5~~(已完成) | 结构化日志 | ✅ structlog JSON 管道 + 桥接 stdlib + `trace_context_middleware`(trace_id/contextvars)+ 请求级 timing。⚠️ 最小实现:uvicorn 未统一、无分段 timing、无细粒度异常映射。详见第 5 节与 `docs/INTERVIEW.md` 的“缓存和可观测性” |
 | ~~Day 6~~(已完成) | 基础监控 | ✅ `prometheus_client` 5 指标(请求数/延迟/token/召回数/rerank 分数)+ `/metrics` 端点。⚠️ rerank 指标因开关关着无数据、rewrite token 未计、未接 Prometheus/Grafana。详见第 5 节 |
 | ~~Day 7~~(已完成) | Docker 整合 | ✅ 提交 `1bed96a`:`Dockerfile`(app 镜像,tiktoken 词表烤进镜像 / 依赖分层缓存,rerank 走 API 后无需 torch)+ `entrypoint.sh`(建表 → `exec uvicorn` 占 PID 1)+ compose 编排两服务 + HF 缓存 volume + `.dockerignore`,一键 `docker compose up` |
 
@@ -268,7 +266,7 @@
 - ~~**RAG 失败留空会话**~~:**已于 Day 2 修复**——写库全部移到 RAG 成功之后,`handle_chat` 单事务一次 commit,失败回滚不留空会话
 - **chat / rerank 调用无重试**:`rewrite_query` / `_generate_answer` / `_generate_answer_stream` 的 `chat.completions.create` 与 `rerank.py` 的 httpx 调用都是裸调,不像 `embedding.py` 有 tenacity 退避;硅基流动撞 429/断连直接 502(流式则在开流后变成 error 帧)。生产需补(复用 embedding 的退避思路,异常类型:chat 用 `openai.APIError`、rerank 用 `httpx.HTTPError`)
 - **`ENABLE_RERANK` 当前为 `False`**:`retrieval.py` 的 A/B 开关现在关着,rerank 未生效,召回排序质量打折(流式不受影响)。要测召回质量记得改回 `True`
-- **日志可观测性是最小实现(Day 5)**:uvicorn 自带 logging 未并入统一管道(原生格式、无 trace_id);只有请求级 timing,无 service 内分段 timing(rewrite/retrieve/generate);异常仅全局 500 兜底 + query.py 的 404/502,无细粒度状态码映射(401/403/429/503)。生产需补,详见 `docs/INTERVIEW.md` 条目 G
+- **日志可观测性是最小实现(Day 5)**:uvicorn 自带 logging 未并入统一管道(原生格式、无 trace_id);只有请求级 timing,无 service 内分段 timing(rewrite/retrieve/generate);异常仅全局 500 兜底 + query.py 的 404/502,无细粒度状态码映射(401/403/429/503)。生产需补,详见 `docs/INTERVIEW.md` 的“缓存和可观测性”及“当前实现必须诚实说明”
 - **监控是最小实现(Day 6/8)**:`rag_rerank_score` 因 `ENABLE_RERANK=False` 无数据;只暴露 `/metrics`,未接 Prometheus 抓取 + Grafana 看板。生产需补。(rewrite token 已于 Week 8 补计;成本 `rag_llm_cost_total` 已加,但 `MODEL_PRICES` 是**占位单价**,需按硅基流动实际计费改才有意义,currency 单位也取决于硅基流动)
 - **答案缓存无精确失效(Week 8)**:`ans:*` 只靠 TTL(1 小时)容忍过时,上传新文档后不会主动清相关缓存,旧答案最长存活 1 小时。生产应在 `/upload` 成功后清 `ans:*`(或更细粒度)。另:embedding 缓存未做"惊群"防护(同一冷 key 并发全部 miss 各打一次 API)、未做二进制紧凑序列化(现 JSON ~20-30KB/条);**语义缓存**(按相似度命中近义问)未做
 - **标题孤儿问题**:Markdown 标题可能被单独切成一个无信息 chunk(如 `## 检索流程`);未处理,Week 13-14 评测暴露后再优化(可选 MarkdownHeaderTextSplitter)

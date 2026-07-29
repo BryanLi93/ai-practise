@@ -93,14 +93,14 @@ fastapi dev app/main.py                   # 起服务(热重载)
 
 ## API
 
-| 端点 | 说明 |
-|---|---|
-| `POST /upload` | 上传 txt / md / pdf → 解析 → 分块 → 向量化 → 入库 |
-| `POST /query` | 问答(非流式),返回答案 + 引用源 + conversation_id |
-| `POST /query/stream` | 问答(SSE 流式),帧序列 `sources → token×N → done` |
-| `/conversations` | 会话 CRUD(创建 / 列表 / 详情 / 删除) |
-| `GET /metrics` | Prometheus 指标(pull 模型) |
-| `/ui/` | 内置极简 Web 界面(三栏:上传 / 对话 / 引用) |
+| 端点                 | 说明                                              |
+| -------------------- | ------------------------------------------------- |
+| `POST /upload`       | 上传 txt / md / pdf → 解析 → 分块 → 向量化 → 入库 |
+| `POST /query`        | 问答(非流式),返回答案 + 引用源 + conversation_id  |
+| `POST /query/stream` | 问答(SSE 流式),帧序列 `sources → token×N → done`  |
+| `/conversations`     | 会话 CRUD(创建 / 列表 / 详情 / 删除)              |
+| `GET /metrics`       | Prometheus 指标(pull 模型)                        |
+| `/ui/`               | 内置极简 Web 界面(三栏:上传 / 对话 / 引用)        |
 
 ## 验证脚本(无 pytest,直接跑)
 
@@ -111,44 +111,3 @@ python -m scripts.test_embed_cache   # embedding 缓存命中 / 降级
 python -m scripts.bench_cache        # 答案缓存前后延迟对比
 python -m scripts.show_metrics       # 打印指标快照
 ```
-
-## 已知限制
-
-- PDF 解析对扫描件(无文本层)无效,需要 OCR
-- 答案缓存只对**无历史首轮**安全(带历史非纯函数);失效靠 TTL(1 小时),未做上传文档时精确清缓存
-- chat(rewrite / 生成)与 rerank 调用暂无重试,硅基流动撞 429 / 断连直接报错
-- `ENABLE_RERANK` 是 A/B 开关,当前默认关闭;开启后召回排序质量更好
-- `MODEL_PRICES` 是占位单价,成本指标要按硅基流动实际计费修改才有意义
-- 监控只暴露 `/metrics`,未接真实 Prometheus 抓取 + Grafana 看板
-- 硅基流动限流取决于服务商,大文档入库受其约束;chat 长生成偶有断连
-- 知识库小于 ~100 chunks 时混合检索的优势不明显
-
-## 后续路线
-
-- 评测体系(Ragas:Context Recall / Faithfulness,Week 13-14)
-- LangGraph Agent 化(Week 9-10)
-- 前端产品化(Next.js + Vercel AI SDK,Week 11-12)
-
-## For 面试
-
-用户问一个问题，端到端发生了什么？请按时间顺序写出每一步。
-为什么 chunks 表的 embedding 列要用 halfvec(1024) 而不是 vector(1024)？(half 精度存储减半)
-为什么用 OpenAI 兼容接口接入硅基流动(chat / embedding / rerank)？换 embedding 模型为什么必须清库重新入库？
-Qwen3.5 是思考模型,RAG 生成 / 查询改写为什么要 enable_thinking=False？(思考链吃光 max_tokens 致 content 为空 + 浪费 token 与延迟)
-db.flush() 和 db.commit() 的差别是什么？为什么 ingest 服务里要 flush 而不直接 commit？
-RAG 的"幻觉"是怎么产生的？我们的 prompt 是怎么约束的？
-
-为什么不只用向量？盲区
-为什么不只用关键词？语义
-为什么要 RRF？两路量纲不同
-为什么还要 Rerank？召回阶段精度有上限
-为什么不只用 Rerank？算不动那么多候选
-
-为什么 embedding 能安全缓存而答案缓存要小心？(纯函数 vs 带历史/知识库会变)
-为什么答案只缓存无历史首轮？带历史时同一句话在不同对话里语义不同。
-缓存挂了会怎样？best-effort 降级成"无缓存",GET/SET 吞掉 RedisError,绝不拖垮主服务。
-流式怎么命中缓存？按同一帧协议重放(sources → 整段答案一帧 token → done),前端无感知。
-
-做过一个完整的 RAG service。技术栈是 FastAPI + PostgreSQL/pgvector,LLM 走硅基流动(SiliconFlow)OpenAI 兼容接口(chat Qwen/Qwen3.5-4B + embedding BAAI/bge-m3)。
-检索是三段式:召回用 pgvector 余弦距离 + zhparser 中文分词的 tsvector 混合检索,RRF 融合(因为两路分数量纲不同);精排用 BGE-reranker-v2-m3 cross-encoder(走硅基流动 /v1/rerank)对 top 20 重排;生成用 Qwen/Qwen3.5-4B(思考模型,生成时 enable_thinking=False),prompt 强约束基于 context 回答并要求 [n] 引用标注。
-几个工程细节:embedding 用 bge-m3(固定 1024 维,远在 pgvector HNSW 2000 维上限内);PDF 解析用 PyMuPDF 加启发式去重复页眉页脚;限流用 tenacity 退避 + 主动节流处理;Redis 缓存 embedding 与首轮答案,缓存 best-effort 降级;structlog + Prometheus 做日志与指标(token / 延迟 / 成本)。LLM 统一走 OpenAI 兼容接口,换 provider / 模型只改 .env;踩过"换 embedding 模型必须清库重灌向量"的坑。
