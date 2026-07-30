@@ -1,401 +1,414 @@
-# 前端流式问答 —— 架构与设计笔记(Week 11 + 12)
+# 前端流式问答架构（Week 11–12）
 
-> 这份文档用于面试讲解,也是给自己理清逻辑用的。
-> **第一部分(1–6 节)是主干**:严格按依赖顺序往下读,读完就能在白板上把整条数据流讲清楚。
-> **第二部分(7–11 节)是难点深挖**:被追问时再展开。
-> **第三部分(12–13 节)是速查**:文件地图 + 速答卡。
-> 全程跟着同一个例子走:用户问「什么是 RAG?」,答案里带一个引用 `[2]`。
+> 这份文档用于理解实现和准备面试，内容以当前代码为准。
+> 建议先读第 1–4 节掌握主链路，再按需看 RAG、Agent、引用和异常处理。
+> 项目路线、后端完整契约与逐日计划见 [PLAN.md](../PLAN.md)。
 
----
+## 1. 核心结论
 
-# 第一部分 · 架构主干
+这是一个基于 Next.js App Router 的 RAG / Agent 聊天前端：
 
-## 1. 一句话定位
+- Next.js Route Handler 充当薄 BFF，把浏览器请求转发给 Python 后端。
+- RAG 与 Agent 后端都返回自定义 SSE，BFF 不翻译业务帧，只透传响应流。
+- 浏览器用自写的 `useStreamChat`（`fetch` + `ReadableStream`）读取 SSE。
+- reducer 把逐帧事件累积成一条扁平的 `ChatMessage`，React 再按字段渲染正文、来源和工具步骤。
 
-这是一个 Next.js(App Router)前端,加一层**薄 BFF 透传代理**。Python 后端(RAG / Agent)吐自定义 SSE 流,BFF 原样转给浏览器;浏览器用自写的 `useStreamChat` Hook(`fetch` + `ReadableStream`)直接读这串 SSE,把每一帧**累积进一条扁平消息对象**,再渲染成流式答案、引用卡片、工具时间线。
+最重要的三项设计如下：
 
-技术栈:Next.js 16(App Router、`src/` 布局)· React 19 · Tailwind v4 · react-markdown + remark-gfm + rehype-highlight。
+| 设计 | 当前实现 | 直接收益 |
+|---|---|---|
+| 薄 BFF | `/api/chat`、`/api/agent`、`/api/upload` | 后端地址和请求约束集中在服务端，浏览器只访问 `/api/*` |
+| 通用流式管道 | `useStreamChat` + `parseSSE` | RAG / Agent 共用读取、停止、重试和状态管理 |
+| 扁平消息模型 | `text`、`sources`、`toolSteps`、`conversationId` | reducer 负责协议适配，组件只消费可渲染字段 |
 
----
+主要技术栈：Next.js 16、React 19、TypeScript 5、Tailwind CSS 4、`react-markdown`、`remark-gfm`、`rehype-highlight`。
 
-## 2. 三个进程,以及为什么要 BFF 这一层
+## 2. 系统边界与请求路径
 
-```
-┌──────────────────────┐   /api/chat      ┌────────────────────┐  /query/stream   ┌──────────────┐
-│  浏览器               │  ─────────────►  │  Next.js BFF        │  ─────────────►  │ RAG 服务      │
-│  fetch+useStreamChat  │                  │  :3000              │                  │ FastAPI :8000 │
-│                       │  ◄─────────────  │  (透传代理)         │  ◄─────────────  │ pgvector/LLM │
-└──────────────────────┘   自定义 SSE(原样) │                    │   自定义 SSE      └──────────────┘
-                                           │                    │   /agent/stream  ┌──────────────┐
-                                           │  /api/agent ───────┼────────────────► │ Agent 服务    │
-                                           │  /api/upload ──────┤                  │ LangGraph     │
-                                           └────────────────────┘                  │ :8100         │
-                                                                                   └──────────────┘
-```
+```mermaid
+flowchart LR
+  Browser["浏览器<br/>Chat UI + useStreamChat"]
 
-- **浏览器**:只跟 `/api/*` 通信,不知道后端地址,也不直接调模型。
-- **Next BFF(本项目)**:透传 SSE + 请求裁剪 + 错误兜底。
-- **RAG :8000 / Agent :8100**:真正干活的 Python 后端,负责检索、LLM、会话持久化、工具调用。
+  subgraph Next["Next.js BFF :3000"]
+    ChatAPI["POST /api/chat"]
+    AgentAPI["POST /api/agent"]
+    UploadAPI["POST /api/upload"]
+  end
 
-**为什么不让浏览器直连后端?** 三点:
+  RAG["RAG 服务 :8000<br/>检索、生成、会话、文档"]
+  Agent["LangGraph Agent :8100<br/>工具决策与执行"]
 
-1. **关注点分离**:LLM、检索、会话持久化、Agent 工具循环都在 Python 后端,前端不重复实现。
-2. **安全收口**:后端地址、`top_k`、上传转发都收在服务端环境变量里(`RAG_API_BASE` / `AGENT_API_BASE`),前端只暴露 `/api/*`;将来加鉴权 / 限流 / 多后端路由都在这一层。
-3. **错误兜底**:后端没起 / 连不上时,route 里 `try/catch` 返回一个干净的 502,而不是把裸网络错误甩给浏览器(见 [11])。
+  Browser -->|"JSON"| ChatAPI
+  ChatAPI -->|"/query/stream"| RAG
+  RAG -->|"自定义 SSE"| ChatAPI
+  ChatAPI -->|"原样响应流"| Browser
 
-> 前端类比:这层就是 BFF / API 网关——前端不直连微服务,中间过一层 gateway 做转发、收口、裁剪。它只转发 SSE,不碰业务语义;翻译语义帧是浏览器端 reducer 的活。
+  Browser -->|"JSON"| AgentAPI
+  AgentAPI -->|"/agent/stream"| Agent
+  Agent -->|"自定义 SSE"| AgentAPI
+  AgentAPI -->|"原样响应流"| Browser
+  Agent -->|"RAG 工具调用"| RAG
 
----
-
-## 3. 核心模型:把「后端语义帧」累积成「一条扁平消息」
-
-整个项目就这一件事。先把两边的数据长什么样摆出来,再看 reducer 怎么把左边累积成右边。
-
-### 3.1 后端给的:一串「语义帧」
-
-后端用 SSE 流式返回,每帧是一行 `data: {json}\n\n`,描述「刚发生了什么」。RAG 模式的帧,顺序固定是 `sources(1) → token(N) → done(1)`:
-
-```
-data: {"type":"sources","sources":[{"id":1,...},{"id":2,...},{"id":3,...}]}
-data: {"type":"token","text":"RAG "}
-data: {"type":"token","text":"指检索增强生成,"}
-data: {"type":"token","text":"先检索[2]再生成。"}
-data: {"type":"done","conversation_id":"c-abc"}
+  Browser -->|"multipart/form-data"| UploadAPI
+  UploadAPI -->|"/upload"| RAG
 ```
 
-帧的语义:`sources` = 这次检索到哪些来源;`token` = 答案的一小段文字(逐 token 来);`done` = 结束,附带这轮的会话 id。中途出错会插一条 `{"type":"error"}`。
+三条实际调用链：
 
-(Agent 模式的帧略有不同,见 [8],但累积思路完全一样。)
+```text
+RAG：   浏览器 → /api/chat   → RAG :8000 /query/stream
+Agent： 浏览器 → /api/agent  → Agent :8100 /agent/stream → RAG 工具
+上传：  浏览器 → /api/upload → RAG :8000 /upload
+```
 
-### 3.2 前端要的:一条消息 = 一个扁平字段对象
+### 2.1 BFF 当前负责什么
 
-一条消息是一个**字段扁平**的 `ChatMessage`(`lib/types.ts`):
+| Route Handler | 职责 |
+|---|---|
+| `/api/chat` | 校验问题；固定 `top_k=5`；转发可选 `conversation_id`；透传 RAG SSE；映射开流前错误 |
+| `/api/agent` | 校验问题；转发 Agent 请求；透传 Agent SSE；映射开流前错误 |
+| `/api/upload` | 接收文件并重新封装为 multipart；回传 RAG 的状态码、响应体和内容类型 |
+
+后端地址来自服务端环境变量 `RAG_API_BASE` 和 `AGENT_API_BASE`，没有通过 `NEXT_PUBLIC_*` 暴露给浏览器。
+
+BFF 目前只是统一入口，不等于完整的安全层：项目尚未实现登录、鉴权、限流或用户隔离。
+
+## 3. 核心模型：事件流如何变成一条消息
+
+后端返回的是“刚发生了什么”，组件需要的是“现在该渲染什么”。reducer 负责把前者累积成后者。
+
+### 3.1 两种后端帧
+
+| 模式 | 帧 | 关键字段 | 含义 |
+|---|---|---|---|
+| RAG | `sources` | `sources` | 本轮检索来源 |
+| RAG | `token` | `text` | 答案增量 |
+| RAG | `done` | `conversation_id` | 流结束，并返回多轮会话 ID |
+| Agent | `token` | `content` | 答案增量，字段名与 RAG 不同 |
+| Agent | `step` | `id`、`status`、`input/output` | 工具开始或完成 |
+| Agent | `done` | 无额外字段 | 流结束 |
+| 两者 | `error` | `message` | 开流后的业务错误 |
+
+RAG 的正常顺序是 `sources → token × N → done`。Agent 客户端不依赖固定数量，只按帧类型处理 `step`、`token` 和 `done`。
+
+### 3.2 前端消息模型
 
 ```ts
 interface ChatMessage {
   id: string;
   role: "user" | "assistant";
-  text: string;                 // 答案正文(已剥 <think>)
-  sources?: Source[];           // RAG 引用来源
-  toolSteps?: { id; data }[];   // Agent 工具时间线
-  conversationId?: string;      // RAG 多轮:下一轮带上
+  text: string;
+  sources?: Source[];
+  toolSteps?: Array<{ id: string; data: ToolStepData }>;
+  conversationId?: string;
 }
 ```
 
-每种信息各占一个字段,渲染端直接取字段。
+映射规则：
 
-### 3.3 reducer 做的:把左边逐帧累积进右边
+| 收到的帧 | reducer 操作 | 渲染或后续用途 |
+|---|---|---|
+| RAG `sources` | `draft.sources = frame.sources` | 引用侧栏 |
+| RAG `token` | `draft.text += strip(frame.text)` | Markdown 正文 |
+| RAG `done` | 写入 `draft.conversationId` | 下一轮请求继续同一会话 |
+| Agent `token` | `draft.text += strip(frame.content)` | Markdown 正文 |
+| Agent `step: running` | 新增同 ID 的工具步骤 | 显示“正在调用” |
+| Agent `step: done` | 按 ID 替换对应步骤并补上输出 | 显示“已调用” |
+| `error` | 抛出异常 | 交给 hook 切换到错误状态 |
 
-对着同一个例子,reducer 消费完所有帧后,那条 assistant 消息长这样:
+例如，RAG 帧：
+
+```text
+sources([1], [2], [3])
+token("RAG 会先检索")
+token("[2]，再生成答案。")
+done("c-abc")
+```
+
+最终累积成：
 
 ```ts
 {
   role: "assistant",
-  text: "RAG 指检索增强生成,先检索[2]再生成。",  // 3 个 token 累积
-  sources: [ /* 3 条来源 */ ],                     // sources 帧
-  conversationId: "c-abc",                         // done 帧
+  text: "RAG 会先检索[2]，再生成答案。",
+  sources: [/* 3 条来源 */],
+  conversationId: "c-abc",
 }
 ```
 
-把 3.1 和 3.3 并排看,reducer(`ragReduce`,在 `lib/reducers.ts`)的全部工作就是这张映射表:
+扁平模型让渲染简单，但也做了一个明确取舍：Agent 的工具步骤与文本分别存储，界面固定显示“工具时间线在上、合并后的正文在下”，不保留两者到达时的逐帧交错顺序。
 
-| 后端帧 | reducer 改写 | 前端用途 |
+## 4. 通用流式管道
+
+### 4.1 前后端流式技术选型
+
+结论：Python 后端使用 **FastAPI / Starlette `StreamingResponse` + SSE** 推流；浏览器使用 **`fetch` + `ReadableStream` + `TextDecoder`** 接收。这里没有使用 WebSocket。
+
+| 环节 | 使用技术 | 作用 |
 |---|---|---|
-| `sources` | `draft.sources = frame.sources` | 来源侧栏 |
-| `token` × N | `draft.text += strip(frame.text)` | Markdown 正文 |
-| `step`(agent) | 增 / 改 `draft.toolSteps`(同 id) | 工具时间线 |
-| `done.conversation_id` | `draft.conversationId = …` | 下一轮带上 |
-| `error` | `throw` → hook 的 catch | 顶部错误条 |
+| RAG 后端 | FastAPI / Starlette `StreamingResponse` | 返回持续输出的 HTTP 响应流 |
+| Agent 后端 | LangGraph `astream` | 产生 token 和工具执行事件 |
+| 数据生成 | Python `async generator` + `yield` | 逐帧生成 `sources`、`token`、`step`、`done` 等事件 |
+| 传输协议 | SSE（`text/event-stream`） | 把每帧编码为 `data: JSON\n\n` |
+| Next.js 中转 | Route Handler + 服务端 `fetch` + Web Streams API | 将 Python 后端的 `upstream.body` 原样转给浏览器 |
+| 浏览器接收 | Fetch API + `ReadableStream<Uint8Array>` | 持续读取响应字节 |
+| 字节解码 | `TextDecoder({ stream: true })` | 正确处理跨 chunk 的 UTF-8 字符 |
+| 事件解析 | buffer + `\n\n` 切帧 + `JSON.parse` | 把网络字节恢复成完整业务帧 |
+| React 更新 | `useStreamChat` + reducer + `setMessages` | 累积正文、来源和工具步骤并刷新界面 |
 
-记住这张表,后面所有细节都是它的展开:每一帧就是「改消息的哪个字段」。
+完整技术链路：
 
-### 3.4 conversation_id:直接挂消息上
+```text
+FastAPI StreamingResponse(async generator)
+  → SSE
+  → Next.js Response(upstream.body)
+  → fetch response.body
+  → ReadableStream + TextDecoder
+  → parseSSE
+  → reducer
+  → setMessages
+```
 
-`conversation_id` 是给「下一轮请求」用的元数据。`done` 帧到达时,reducer 把它写进消息的 `conversationId` 字段。下一轮发请求时,从「最近一条 assistant 消息」读它带上(见 [10])。它不进正文,只是消息对象上的一个字段。
+没有使用原生 `EventSource`，因为当前接口需要通过 POST 发送 JSON 请求体，同时需要使用 `AbortController` 停止生成；`fetch + ReadableStream` 能同时满足这两个要求。
 
-> 一句话抓住本质:**后端流 = 一串「发生了什么」的语义事件;前端消息 = 一个「该渲染什么」的扁平对象;reducer 就是把事件逐帧累积进这个对象的纯函数。**
+`useStreamChat` 不理解 RAG 或 Agent 的业务语义，只负责一次流式请求的生命周期：
 
----
+1. `send` 追加一条 user 消息。
+2. `stream` 再追加一条空的 assistant 草稿，并把状态设为 `streaming`。
+3. `fetch` 向 `/api/chat` 或 `/api/agent` 发起 POST 请求。
+4. `parseSSE` 从响应体逐帧读取 JSON。
+5. 当前模式的 reducer 修改草稿。
+6. 每帧复制最新草稿并 `setMessages`，触发流式渲染。
+7. 正常结束后回到 `ready`；异常进入 `error`；用户停止则回到 `ready`。
 
-## 4. 流式管道:通用 hook + 每模式 reducer 两层
-
-分两层:通用的「读流 + 触发渲染」机制,和每模式「帧改哪个字段」的纯逻辑。
-
-**第一层:通用流式管道 `useStreamChat`(`lib/useStreamChat.ts`)。** 不关心帧的语义,只管 fetch、读流、把每帧交给 reducer、触发重渲染:
+核心过程可以压缩为：
 
 ```ts
-const res = await fetch(api, { method: "POST", body: JSON.stringify({ question, ...body }), signal });
-for await (const frame of parseSSE(res.body)) {
-  reduce(frame, draft, strip.push);                  // 这一帧改写草稿的哪个字段
-  commit(messages.map(m => m.id === draft.id ? { ...draft } : m));  // 每帧 setMessages → 流式刷新
+for await (const frame of parseSSE(response.body)) {
+  reduce(frame, draft, strip.push);
+  commit(replaceDraft(messages, { ...draft }));
 }
 ```
 
-它还管了对话状态那一摊:`status`(ready/streaming/error)、`stop`(`AbortController.abort`)、`regenerate`(回退到最后一条 user 重发)、`reset`(切模式清空)。`<think>` 剥离器作为 `strip` 注入给 reducer。
+### 4.2 SSE 如何处理拆包
 
-**第二层:每模式的 reducer(`lib/reducers.ts`)。** 纯函数,`switch` 帧 type 改 `draft` 字段,就是 3.3 那张表:
+网络 chunk 不等于 SSE 事件，一条 JSON 可能跨多个 chunk。`parseSSE` 因此：
 
-```ts
-function ragReduce(frame, draft, strip) {
-  switch (frame.type) {
-    case "sources": draft.sources = frame.sources; break;
-    case "token":   draft.text += strip(frame.text); break;
-    case "done":    draft.conversationId = frame.conversation_id; break;
-    case "error":   throw new Error(frame.message);
-  }
-}
+- 用 `TextDecoder.decode(value, { stream: true })` 正确拼接跨 chunk 的 UTF-8 字符。
+- 把文本保存在 `buffer`，按后端约定的 `\n\n` 切分事件。
+- 合并事件内的多行 `data:`，再执行 `JSON.parse`。
+- 流结束时处理剩余 buffer，并在 `finally` 中释放 reader。
+
+当前策略会跳过无法解析的 JSON 帧，而不是让整条流立即失败；这是容错，也是可观测性上的限制。
+
+### 4.3 `<think>` 为什么需要状态机
+
+`<think>` 或 `</think>` 可能被拆在两个 token 中，单次 `replace` 无法可靠处理。`createThinkStripper` 用三个要素跨 token 记忆状态：
+
+- `text` 模式：输出正文，遇到 `<think>` 后切换状态。
+- `think` 模式：丢弃内容，遇到 `</think>` 后恢复输出。
+- `carry`：暂存可能是标签前缀的尾部，例如 `</thi`，等下一段拼接后再判断。
+
+流结束时，只有 `text` 模式下的剩余内容会被补到正文。
+
+### 4.4 对话状态
+
+| 状态或操作 | 实现 |
+|---|---|
+| `ready / streaming / error` | `ChatStatus` |
+| 停止 | `AbortController.abort()`；客户端主动停止不记为错误 |
+| 重试 | 回退到最后一条 user 消息，用原请求参数重新生成 |
+| 重置 | 终止当前请求，清空消息和错误 |
+| 防止异步闭包读旧值 | `messagesRef` 与 React state 通过统一的 `commit` 同步更新 |
+
+## 5. RAG 模式
+
+### 5.1 端到端链路
+
+```text
+Chat.send
+  → 从最近一条 assistant 消息读取 conversationId
+  → useStreamChat.send(question, { conversation_id? })
+  → POST /api/chat
+  → BFF 转发 /query/stream，并补上 top_k=5
+  → sources / token / done
+  → ragReduce 累积 sources、text、conversationId
+  → MessageItem 渲染答案和来源入口
 ```
 
-**一条要点:工具步骤按 id 原地更新。** Agent 的工具 `running` 和 `done` 两帧用**同一个 id**:`agentReduce` 在 `running` 时往 `draft.toolSteps` push 一条,在 `done` 时按 id `map` 找到那条、原地补上 `output`。卡片就从「⏳ 调用中」变成「✅ 完成」。这叫按 id 协调(reconciliation),心智模型就是 React 的 `key`——一次普通的数组 `map`。
+`conversation_id` 只存在于 RAG 模式。它由 `done` 帧写回当前 assistant 消息，下一轮再从最近一条 assistant 消息读取。刷新页面或切换模式后，前端不会恢复这段会话。
 
-> hook 那层的 `reduce` 形参是 `frame: unknown`(后端 JSON 的动态边界),进了具体 reducer 才精确成 `BackendFrame` / `AgentFrame`;Chat 按 mode 选定 reducer 时 `as Reduce` 跨过这个边界。
+### 5.2 引用溯源
 
----
+答案正文中的 `[n]` 与 `sources[].id` 由后端对齐，前端只负责把有效编号变成可交互引用：
 
-## 5. 端到端走一遍:一个 token 从后端到屏幕
-
-有了模型,现在把 `"先检索[2]再生成。"` 这一段 token 的完整旅程串起来:
-
-```
-① 用户回车
-   Chat.tsx send() → useStreamChat.send(q, { conversation_id })   // 从最近 assistant 取 conversationId
-
-② hook POST /api/chat
-   body = { question: q, conversation_id }
-
-③ route.ts(POST):
-   - fetch 后端 /query/stream(try/catch:连不上就返回干净的 502)
-   - 拿到响应体后:return new Response(upstream.body, { SSE 头 })   ← 透传,不翻译
-
-④ 浏览器 hook 的 for await (parseSSE(res.body)) 逐帧 reduce:
-   sources → draft.sources = [...]
-   token   → 先剥 <think>,再 draft.text += "先检索[2]再生成。"
-   done    → draft.conversationId = "c-abc"
-   每帧 commit → setMessages
-
-⑤ React 重渲染:MessageItem → MessageContent → <Markdown> 把累积文本渲染成 Markdown,
-   sources 喂给右侧来源栏
+```text
+答案中的 [2]
+  → rehype-citations 把有效编号改成 <cite data-ref="2">
+  → Markdown 的 CiteRef 触发 onCite(2)
+  → MessageItem 把“本条消息的 sources + 编号 2”交给 Chat
+  → Chat 更新全局 activeSources
+  → SourcesPanel 展开、高亮并滚动到来源 2
 ```
 
-一句话:**后端语义帧 →(BFF 透传)→ 浏览器 parseSSE 逐帧 → reducer 累积进扁平消息 → React 渲染**。
+实现边界：
 
----
+- 只转换当前消息 `sources` 中存在的编号。
+- 跳过 `code` 和 `pre`，代码里的 `[2]` 不会被识别为引用。
+- 来源列表属于具体消息；侧边栏全局只有一个，因此共享状态放在共同父组件 `Chat`。
+- 高亮和展开状态从 props 派生，`useEffect` 只执行 `scrollIntoView`。
 
-## 6. 前端怎么消费这条消息
+## 6. Agent 模式
 
-组件做的事就是「按字段各取所需」。三个工具函数(`message-utils.ts`)把消息解读成视图要的东西:
+Agent 模式复用同一个 `useStreamChat`，只替换 endpoint 和 reducer：
 
-```ts
-getText(m)      // m.text                  → 答案正文
-getSources(m)   // m.sources ?? []         → Source[]
-getToolSteps(m) // m.toolSteps ?? []       → 工具步骤列表
+```text
+/api/agent + agentReduce
+  → step(running)：新增工具步骤
+  → step(done)：按相同 id 补齐 output，并切换为 done
+  → token(content)：追加答案正文
+  → done：结束
 ```
 
-`MessageItem` 据此渲染:工具时间线在上(它是为产出答案做的前置工作),答案正文在下,底部是「来源 N」按钮和反馈。整条链是:
+与 RAG 的关键差异：
 
-```
-useStreamChat(messages)
-  → Chat.tsx 遍历 messages
-    → MessageItem(单条消息)
-      → ToolTimeline(getToolSteps)            工具卡片
-      → MessageContent → Markdown(getText)    答案正文
-      → 「📚 来源」按钮(getSources)          点开右侧来源栏
-```
+| 对比项 | RAG | Agent |
+|---|---|---|
+| token 字段 | `text` | `content` |
+| 来源 | 有 `sources` 帧 | 无结构化来源帧 |
+| 多轮 ID | `done.conversation_id` | 无 |
+| 工具步骤 | 无 | `step` 帧，running / done 用同一 ID 配对 |
 
-来源栏 `SourcesPanel` 是**全局唯一一个**,但要显示**某条消息**的来源,所以它的状态被提升到了 `Chat`(见 [9])。
+`ToolTimeline` 根据步骤状态展示工具名、入参和返回值。`MessageItem` 固定先渲染工具时间线，再渲染合并后的 Markdown 正文。
 
-> `message-utils` 这三个函数是消息模型和视图之间的唯一接缝:组件只依赖它们,不直接碰 `ChatMessage` 的字段结构。
+## 7. 渲染与状态归属
 
----
+| 层 | 主要职责 |
+|---|---|
+| `Chat` | 模式、输入、上传、全局来源侧栏、自动滚动；选择 endpoint 和 reducer |
+| `useStreamChat` | 消息、流式状态、请求取消、重试和重置 |
+| `MessageItem` | 单条消息、工具时间线、正文、来源入口和本地反馈 |
+| `Markdown` | GFM、代码高亮、有效引用编号转换 |
+| `SourcesPanel` | 桌面常驻侧栏、移动端抽屉、来源展开与定位 |
+| `ToolTimeline` | Agent 工具步骤的 running / done 展示 |
 
-# 第二部分 · 难点深挖
+Markdown 渲染链：
 
-## 7. `<think>` 流式剥离状态机
-
-**问题**:中转模型会在正文前输出一段 `<think>...</think>` 推理,要在客户端 hook 里剥掉。难点是 token 逐段到达,`</think>` 这个标记可能被切在两个 token 里(先到 `</thi`,再到 `nk>`)。
-
-**为什么不能 `String.replace`**:replace 只能处理完整字符串;流式场景下手上的标记是残缺的。
-
-**做法**(`lib/think.ts`):一个跨 chunk 的状态机,有 `text` / `think` 两个状态。核心是「保守消费长度」函数 `safeLen`——只消费能确定的部分,把可能是半截标记的尾巴留到下次:
-
-```ts
-function safeLen(buf: string, tag: string): number {
-  const max = Math.min(buf.length, tag.length - 1);
-  for (let k = max; k > 0; k--) {
-    if (tag.startsWith(buf.slice(buf.length - k))) return buf.length - k; // 末尾是 tag 前缀,留住
-  }
-  return buf.length;
-}
+```text
+ChatMessage.text
+  → MessageContent
+  → ReactMarkdown
+  → remark-gfm
+  → rehype-citations
+  → rehype-highlight
+  → React 元素
 ```
 
-**逐字符走一遍**(状态 = text,buf = `"答案<thi"`,tag = `"<think>"` 长 7):
+流式阶段每个事件都会更新消息，正在生成的 Markdown 会被重复解析。当前用 `memo`、稳定的 `sources` / `validIds` / `onCite` 引用以及轻量同步高亮减少无关重渲染；尚未实现批量提交或节流。
 
-- `max = min(6, 6) = 6`
-- k=6:`"答案<thi"`,`"<think>".startsWith("答案<thi")`? 否
-- k=5:`"案<thi"`? 否
-- k=4:`"<thi"`,`"<think>".startsWith("<thi")`? **是** → 返回 `6-4 = 2`
+## 8. 上传、错误与交互状态
 
-于是输出前 2 个字 `"答案"`,把 `"<thi"` 留到下一段(carry)。下段来 `"nk>正文"`,拼成 `"<think>正文"`,命中完整 `<think>`,进入 think 状态丢弃内容,直到 `</think>` 才切回 text。流结束时 `flush()`:text 状态下 carry 是真实正文要补出,think 状态下未闭合就丢弃。
+### 8.1 文件上传
 
-> 这是经典的流式解析 / 拆包问题,和「解析 TCP 字节流、chunked 传输里一条消息被拆成多包」同一类。在 hook 里,它是 `const strip = createThinkStripper()`,`strip.push` 注入给 reducer 逐帧调用,`strip.flush()` 在流结束补尾。
+- 客户端先校验扩展名和 30 MB 上限。
+- 支持 `.txt`、`.md`、`.markdown`、`.pdf`。
+- 使用 `XMLHttpRequest`，因为 `xhr.upload.onprogress` 可以提供上传进度。
+- `/api/upload` 把文件转发给 RAG `/upload`。
+- 成功后显示文件名和 `chunk_count`，文档进入同一个 RAG 知识库。
 
----
+### 8.2 错误分层
 
-## 8. Agent:token 与工具交替,扁平字段天然保住顺序
+| 阶段 | 当前处理 |
+|---|---|
+| 空问题 | BFF 返回 400 |
+| chat / agent 无法连接后端 | Route Handler 捕获网络异常并返回 502 |
+| 后端在开流前返回 4xx / 5xx | BFF 回传状态码和响应体；hook 进入 `error` |
+| 后端开流后失败 | 后端发送 `error` 帧；reducer 抛出；hook 进入 `error` |
+| 用户点击停止 | 中止浏览器请求，保留已收到内容，不显示错误 |
+| 上传后端返回错误 | `/api/upload` 回传后端状态码和响应体 |
 
-**现象**:Agent 的帧是交替来的——先 `token`(前导:「我先查一下知识库…」)→ `step`(工具)→ 再 `token`(最终答案)。它的 token 字段叫 `content`(不是 RAG 的 `text`),done 不带 conversation_id,也没有 sources 帧。
+错误 UI 统一显示错误文案和“重试”。重试会丢弃失败的 assistant 草稿，但保留对应 user 消息。
 
-**怎么保住阅读顺序**:token 全累积进一个 `draft.text`,step 全累积进 `draft.toolSteps`,两个字段互不干扰。阅读顺序不靠帧到达顺序,而靠 `MessageItem` 的**固定渲染顺序**:工具时间线永远在上、答案正文永远在下(前导和最终答案同属 `text`,自然拼在一起)。
+## 9. 文件地图
 
-```ts
-function agentReduce(frame, draft, strip) {
-  switch (frame.type) {
-    case "token": draft.text += strip(frame.content); break;          // ⚠️ 字段是 content
-    case "step":
-      if (frame.status === "running")
-        draft.toolSteps = [...(draft.toolSteps ?? []), { id: frame.id, data: { tool: frame.tool, status: "running", input: frame.input } }];
-      else  // done 帧只带 output,按 id 找到那条 running 原地补
-        draft.toolSteps = (draft.toolSteps ?? []).map(s =>
-          s.id === frame.id ? { id: s.id, data: { ...s.data, status: "done", output: frame.output } } : s);
-      break;
-    case "done": break;   // agent 无 conversation_id / 无 sources
-  }
-}
-```
-
-> 这一节用到第 4 节那条要点:工具 `running`→`done` 靠**同 id 原地更新**(上面那次 `map`),卡片状态原地翻成完成。
-
----
-
-## 9. 引用溯源:从 `[2]` 文本到侧边栏高亮
-
-> 这一节是纯前端渲染,与流式管道无关。
-
-### 9.1 完整链路
-
-```
-答案 text 里的 "[2]"
-  │  rehype-citations.ts:Markdown 解析阶段,把【编号有效】的 [n] 换成 <cite data-ref=2>
-  ▼
-react-markdown 渲染 <cite> → <CiteRef refNum={2}>,点击时经 React Context 调 onCite(2)
-  ▼
-MessageItem.onCite(2) = onActivateSources(本条消息的 sources, 2)   ← 数据往上传到 Chat
-  ▼
-Chat.activateSources:setActive({sources, ref:2, key++}) + 打开抽屉(移动端)
-  ▼
-<SourcesPanel sources activeRef=2>   ← 数据往下传
-  │  派生:card[2] 高亮 + 展开;useEffect 只做 scrollIntoView
-  ▼
-侧边栏 card[2] 滚到中央 + 蓝框高亮 + 展开原文
-```
-
-### 9.2 为什么把状态提升到 Chat(lifting state up)
-
-侧边栏全局只有一个,却要显示**某一条消息**的来源。消息列表和侧边栏是两个兄弟组件、要共享数据,所以把状态提升到最近的公共父组件 `Chat`。
-
-> 这是 React 经典题「状态放哪」。细节:`active.key` 每次点击自增,是为了重复点同一个 `[n]` 也能重新触发定位——否则 `ref` 没变,effect 不会重跑。
-
-### 9.3 派生状态优先于在 effect 里 setState
-
-卡片是否高亮 / 展开,直接从 props 算,不另存 state(最初在 `useEffect` 里 setState 被 eslint `set-state-in-effect` 拦了):
-
-```tsx
-open={openCards.has(s.id) || s.id === activeRef}   // 当前定位的那张自动展开
-highlighted={s.id === activeRef}
-```
-
-`useEffect` 里只留一个真正的副作用:`scrollIntoView`(DOM 操作,不是 setState)。
-
-> 要点:能从现有 props/state 算出来的,就不要再存一份 state(React 官方《You Might Not Need an Effect》)。少一份 state,少一类「状态不同步」的 bug。
-
-### 9.4 rehype 插件为什么自己手写
-
-要把 `[n]` 变可点击,得在 Markdown 解析阶段改节点。手写遍历 hast(没引 `unist-util-visit`):只动 `text` 节点,把编号**有效**(在该消息 sources 里)的 `[n]` 拆成 `<cite>`;无效编号(如 `[99]`)原样留作文本;跳过 `code` / `pre`,代码块里的 `[0]` 不算引用。
-
----
-
-## 10. 多轮会话 与 RAG / Agent 模式切换
-
-- **多轮**:RAG 后端按 `conversation_id` 在库里重建历史。客户端 `send` 时,从「最近一条 assistant 消息」的 `conversationId` 字段(`done` 帧写进去的)取出来,作为 body 带上;Agent 不带。
-- **模式切换**:`Chat` 的 `mode` state 决定 `useStreamChat` 的 `api`(`/api/chat` vs `/api/agent`)和 `reduce`(`ragReduce` vs `agentReduce`);切换时调 hook 的 `reset()` 清空当前会话,两模式各自独立。
-  > 当前是「切换即清空」。要保留各模式历史的话,把 `messages` 提成 `Record<mode, ChatMessage[]>` 即可,目前没做这个需求。
-
----
-
-## 11. 其余横切关注点
-
-**文件上传(`lib/upload.ts`)**:用 `XMLHttpRequest` 不用 `fetch`,因为只有 `xhr.upload.onprogress` 能拿到上传进度做进度条。走 BFF:`/api/upload` 读 formData 里的 file,以 multipart 转发给 RAG `/upload`,原样回传。拖拽:消息区 `onDragOver`/`onDrop` + 虚线遮罩;成功显示 `chunk_count`,传完即可直接提问该文档(RAG 和 Agent 查同一个库)。
-
-**错误处理(分两段)**:① 开流**前**(连不上 / 4xx / 5xx)在 route 里 `try/catch`,返回干净的 502——否则 fetch 抛错会变成 500;hook 里 `res.ok` 为假时把 body 文案抛出。② 开流**后**中途失败,后端塞一条 `error` 帧,reducer `throw`,被 hook 的 `catch` 接住设 `status="error"`。两者都汇到顶部错误条 +「重试」(`regenerate()`)。
-
-**Loading / 停止**:首 token 前显示「思考中…」;流式中「发送」变「停止」(hook 的 `stop()` = `AbortController.abort()`,fetch 循环抛 AbortError 被识别为「用户主动停」而非错误)。
-
-**性能(引用稳定性 + memo)**:每帧 `setMessages`,靠 `memo` 兜重渲染:`useMemo(() => getSources(message), [message])` + `useCallback` 稳定 `onCite` + `memo` 包 `Markdown`。消息定型后 `message` 引用稳定 → 派生值稳定 → memo 生效 → **只有正在流的那条重算**。长答案若觉得卡,在 hook 里给 `commit` 加个 ~50ms 节流即可。关键认知:memo 是否生效取决于传进去的引用稳不稳;每次渲染传新对象/新函数,memo 就失效了。
-
-**响应式侧边栏**:同一个 `<aside>` 靠 Tailwind 断点切形态,不写两套组件。桌面 `lg:static` 常驻右栏;移动端 `fixed ... translate-x-full`(关)/`translate-x-0`(开)从右侧滑入,配 `lg:hidden` 遮罩。
-
----
-
-# 第三部分 · 速查
-
-## 12. 文件地图(谁负责什么)
-
-```
+```text
 src/
 ├─ app/
-│  ├─ page.tsx                 渲染 <Chat/>
-│  ├─ layout.tsx, globals.css  字体、Tailwind、highlight.js 主题、代码块样式
+│  ├─ page.tsx
+│  ├─ layout.tsx
+│  ├─ globals.css
 │  └─ api/
-│     ├─ chat/route.ts         BFF 透传:fetch RAG /query/stream,原样转 SSE(+ try/catch 502 兜底)
-│     ├─ agent/route.ts        BFF 透传:fetch Agent /agent/stream,原样转 SSE
-│     └─ upload/route.ts       BFF 透传:multipart 转发到 RAG /upload
+│     ├─ chat/route.ts         RAG SSE 透传
+│     ├─ agent/route.ts        Agent SSE 透传
+│     └─ upload/route.ts       文件上传转发
 ├─ lib/
-│  ├─ types.ts                 Source / 后端帧类型(BackendFrame/AgentFrame)/ ChatMessage(扁平消息模型)
-│  ├─ sse.ts                   解析 SSE(按 \n\n 跨 chunk 切帧),parseSSE<T>
-│  ├─ think.ts                 <think> 流式剥离状态机
-│  ├─ useStreamChat.ts         ★ 流式 hook:fetch+ReadableStream+parseSSE+reduce;管 messages/status/stop/regenerate/reset
-│  ├─ reducers.ts              ★ ragReduce / agentReduce:语义帧 → 扁平消息字段(核心,可单测)
-│  ├─ rehype-citations.ts      [n] → <cite> 的 rehype 插件
-│  └─ upload.ts                XHR 上传(onprogress 进度)+ 前端校验
+│  ├─ types.ts                 Source、后端帧、ChatMessage
+│  ├─ sse.ts                   SSE 拆包与 JSON 解析
+│  ├─ think.ts                 <think> 跨 chunk 剥离
+│  ├─ useStreamChat.ts         通用流式请求与对话状态
+│  ├─ reducers.ts              RAG / Agent 帧到消息字段的映射
+│  ├─ rehype-citations.ts      [n] 到可点击引用节点
+│  └─ upload.ts                客户端校验与 XHR 上传
 └─ components/chat/
-   ├─ Chat.tsx                 useStreamChat、模式切换(选 api+reducer)、上传、错误/重试/停止、状态提升
-   ├─ MessageItem.tsx          单条消息:工具时间线 + 答案 + 来源/反馈
-   ├─ MessageContent.tsx       薄封装,转发给 Markdown
-   ├─ Markdown.tsx             react-markdown + remark-gfm + rehype-highlight + cite 组件
-   ├─ ToolTimeline.tsx         Agent 工具时间线(running→done)
-   ├─ SourcesPanel.tsx         引用侧边栏(桌面常驻 / 移动抽屉)+ SourceCard
-   └─ message-utils.ts         getText / getSources / getToolSteps(从扁平字段读视图数据)
+   ├─ Chat.tsx                 页面编排与共享状态
+   ├─ MessageItem.tsx          单条消息
+   ├─ MessageContent.tsx       Markdown 薄封装
+   ├─ Markdown.tsx             Markdown、GFM、高亮、引用组件
+   ├─ SourcesPanel.tsx         来源侧栏
+   ├─ ToolTimeline.tsx         工具时间线
+   └─ message-utils.ts         从消息读取视图数据
 ```
 
-后端前置(在 `0910-langgraph-agent`):`15_agent_server.py` 暴露 `/agent/stream`(:8100)。
+真正决定架构行为的四个文件是：
 
----
+1. `app/api/{chat,agent}/route.ts`：BFF 是否翻译或透传协议。
+2. `lib/sse.ts`：字节流如何还原成事件。
+3. `lib/useStreamChat.ts`：一次流式请求的生命周期。
+4. `lib/reducers.ts`：事件如何变成可渲染消息。
 
-## 13. 面试速答卡
+## 10. 当前边界与剩余风险
 
-**Q:整体架构一句话?**
-A:Next BFF 透传 + 自写 `useStreamChat`(fetch + ReadableStream)直接读后端自定义 SSE,reducer 把语义帧逐帧累积成一条扁平消息。
+| 当前边界 | 影响 |
+|---|---|
+| 无登录、鉴权、限流和用户体系 | 适合作品演示，不适合直接作为多租户生产系统 |
+| `top_k=5` 固定在 `/api/chat` | UI 无法按请求调整检索数量 |
+| 消息只保存在 React state | 刷新页面丢失；没有会话列表与恢复 |
+| 切换 RAG / Agent 会调用 `reset` | 两种模式的前端历史都不会保留 |
+| Agent 采用扁平字段 | 工具步骤和正文的真实交错顺序被规范化 |
+| 后端帧没有运行时 schema 校验 | 类型通过 `unknown → Reduce` 断言跨边界，协议漂移只能在运行时暴露 |
+| 无法解析的 SSE JSON 会被静默跳过 | 单帧损坏不会终止整流，但问题不易发现 |
+| 每帧都 `setMessages` 并解析 Markdown | 长回答可能需要约 50 ms 的批量刷新或节流 |
+| `/api/upload` 没有单独捕获连接异常 | RAG 服务不可达时，上传错误不如 chat / agent 的 502 文案稳定 |
+| 反馈按钮只保存组件本地状态 | 没有提交到后端，也不能用于评测 |
+| 流式 Route Handler 的 `maxDuration=60` | 长请求仍受部署平台实际执行时限影响 |
+| `package.json` 没有自动化测试脚本 | reducer、SSE 拆包和 `<think>` 状态机主要依赖人工验证 |
 
-**Q:核心逻辑到底做什么?**
-A:后端给的是一串「发生了什么」的事件(sources/token/done);前端要的是一条「该渲染什么」的扁平消息。reducer 逐帧把事件累积进消息的对应字段(text / sources / toolSteps / conversationId)。
+## 11. 面试速答
 
-**Q:为什么不前端直接调模型 / 直连后端?**
-A:LLM/检索/会话都在后端,前端不重复造;BFF 做安全收口(藏地址)+ 错误兜底 + 将来鉴权/限流的口子。它只转发,不翻译。
+**整体架构是什么？**
 
-**Q:流式状态怎么管的?**
-A:发送时挂一条空 assistant 草稿,`for await (parseSSE(res.body))` 每帧 `reduce` 改写草稿、`setMessages` 触发渲染;`status` 跟踪 streaming/ready/error;`stop` 用 `AbortController.abort()`。
+Next.js BFF 透传 Python 后端的自定义 SSE；浏览器用 `fetch + ReadableStream` 读流；reducer 把语义帧累积成扁平 `ChatMessage`；React 按字段渲染正文、引用和工具步骤。
 
-**Q:工具卡片 running→done 怎么原地更新?**
-A:两帧用同一个 `tool_call_id` 当 id,`agentReduce` 在 running 时 push、done 时按 id `map` 原地补 output(像 React 的 key 那套 reconciliation)。
+**为什么需要 BFF？**
 
-**Q:token 和工具交替时,阅读顺序怎么保证?**
-A:token 累积进 `text`、step 累积进 `toolSteps`,两字段独立;`MessageItem` 固定「工具时间线在上、答案正文在下」。
+它把后端地址、固定参数、上传转发和开流前错误处理集中在服务端，也为以后增加鉴权、限流和多后端路由保留统一入口。当前 BFF 本身还没有实现这些生产能力。
 
-**Q:引用 `[n]` 点击联动?**
-A:rehype 把有效 `[n]` 变 `<cite>` → 经 Context 调 onCite → 把该消息 sources 提升到 Chat → 下传侧边栏 → 派生高亮/展开 + effect 里 scrollIntoView。
+**为什么用 `fetch`，不用原生 `EventSource`？**
 
-**Q:`<think>` 怎么剥?为什么不能 replace?**
-A:标记会被切在两个 token 里,用跨 chunk 状态机 + 留住半截前缀在客户端 hook 里逐帧剥;replace 只能处理完整字符串。
+当前接口是带 JSON 请求体的 POST，且前端需要用 `AbortController` 主动停止。`fetch` 能同时满足 POST、读取响应流和取消请求。
 
-**Q:错误处理?**
-A:开流前(连不上/4xx/5xx)route 里 try/catch 映射成干净 502;开流后中途失败后端塞 error 帧、reducer 抛异常被 hook catch;前端统一错误条 + 重试。
+**SSE 为什么不能按网络 chunk 直接解析？**
+
+网络 chunk 与事件边界无关，一个 JSON 或 UTF-8 字符都可能被拆开。客户端必须先用流式 `TextDecoder` 解码，再在 buffer 中按 `\n\n` 切事件。
+
+**RAG 和 Agent 怎么共用一套聊天逻辑？**
+
+读取流、状态、停止和重试由 `useStreamChat` 统一处理；两种协议的字段差异留给 `ragReduce` 和 `agentReduce`。
+
+**引用 `[n]` 怎么定位到原文？**
+
+rehype 插件只把有效 `[n]` 转为可点击节点，点击后把本条消息的 `sources` 和编号提升到 `Chat`，再由全局 `SourcesPanel` 展开、高亮并滚动到对应卡片。
+
+**错误怎么处理？**
+
+开流前依靠 HTTP 状态码，开流后依靠 `error` 帧，二者最终都进入 hook 的错误状态；用户主动 `abort` 不算错误，重试会重放最后一轮请求。
